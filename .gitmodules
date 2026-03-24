@@ -1,0 +1,3 @@
+[submodule "src/official_LLaDA"]
+	path = src/official_LLaDA
+	url = https://github.com/gkswns3708/MolDA.git
