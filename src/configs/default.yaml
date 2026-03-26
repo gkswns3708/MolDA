@@ -1,0 +1,27 @@
+defaults:
+  - trainer: default      # 커맨드라인에서 trainer=stage1/2/3으로 교체
+  - data: toy100
+  - gnn: gine_tokengt
+  - _self_
+
+seed: 42
+mode: ft                  # ft | test | validate
+debug: false
+
+# Checkpoint 로드
+# ckpt_path: 특정 checkpoint에서 학습 재개 (optimizer, scheduler, epoch 모두 복원)
+# pretrained_ckpt_path: 가중치만 로드 (학습은 처음부터) — Stage N→N+1 이전 시 사용
+# 두 값 동시에 사용 불가
+ckpt_path: null
+pretrained_ckpt_path: null
+
+wandb:
+  entity: null
+  project: molda
+  log_freq: 10
+  id: null
+
+# 분자 표현 augmentation (데이터 전처리 시 적용)
+shuffle_selfies: false
+shuffle_graph: false
+process_disjoint: true

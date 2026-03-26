@@ -1,0 +1,41 @@
+# @package _global_
+# Stage 2: Q-Former Alignment
+# Trainable: Q-Former + query_tokens + opt_proj + ln_graph
+# Frozen:    LLM (LoRA 포함), GNN
+defaults:
+  - default
+  - _self_
+
+stage: 2
+
+model:
+  mol_representation: string+graph
+  tune_gnn: false
+
+hardware:
+  # Stage 2는 unused param 없음 (LoRA frozen이므로)
+  find_unused_parameters: true # Q-Former는? 
+
+training:
+  max_epochs: 1             # 논문 권장: 1 epoch
+  batch_size: 3
+  accumulate_grad_batches: 10
+
+scheduler:
+  warmup_steps: 50          # Stage 1보다 짧게
+
+lr:
+  lora: 0.0                 # frozen
+  embed_orig: 0.0           # frozen
+  embed_new: 0.0            # frozen
+  head_orig: 0.0            # frozen
+  head_new: 0.0             # frozen
+  other: ???                # Q-Former, query_tokens, opt_proj, ln_graph
+
+validation:
+  check_val_every_n_epoch: 1
+
+logging:
+  dir: ./checkpoint/stage2
+  # LLaDA layer names: wte=embedding, ff_out=lm_head
+  weight_norm_layers: [Qformer, query_tokens, opt_proj, ln_graph]

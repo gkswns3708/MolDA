@@ -1,0 +1,29 @@
+type: gine_tokengt
+hidden_dim: 1024            # GINE, TokenGT 공통 출력 차원
+
+# ─────────────────────────────────────────────
+# GINE (Graph Isomorphism Network with Edge features)
+# 참고: Old_MolDA/model/gin_model.py (GNN_MoleculeSTM)
+# ─────────────────────────────────────────────
+gine:
+  num_layers: 5
+  hidden_dim: 1024
+  drop_ratio: 0.0
+  jk: last                  # Jumping Knowledge: last | sum | cat
+  ckpt: null                # pretrained checkpoint 경로 (TBD)
+
+# ─────────────────────────────────────────────
+# TokenGT (Graph Transformer, nodes+edges as tokens)
+# 참고: Old_MolDA/model/tokenGT.py (BERTTokenGT)
+# ─────────────────────────────────────────────
+tokengt:
+  input_feat_dim: 9         # node feature 차원 (OGB 9차원)
+  hidden_dim: 1024
+  num_layers: 5
+  num_heads: 8
+  method: laplacian         # positional encoding 방법
+  d_p: 64                   # node PE 차원
+  d_e: 64                   # edge PE 차원
+  use_graph_token: true     # graph-level summary token 사용
+  max_position_embeddings: 102
+  ckpt: null                # pretrained checkpoint 경로 (TBD)

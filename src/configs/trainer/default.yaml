@@ -1,0 +1,147 @@
+# @package _global_
+# Stage 1 기본값. stage2/3.yaml에서 필요한 항목만 override.
+
+stage: 1
+
+# ─────────────────────────────────────────────
+# Hardware
+# ─────────────────────────────────────────────
+hardware:
+  accelerator: gpu
+  devices: "0,1,2,3"
+  precision: bf16-mixed
+  num_workers: 0
+  # LoRA frozen base param이 존재하므로 DDP backward 전 확인 필요
+  find_unused_parameters: true
+
+# ─────────────────────────────────────────────
+# Model Architecture
+# ─────────────────────────────────────────────
+model:
+  llm: GSAI-ML/LLaDA-8B-Instruct
+  tune_llm: lora            # lora | full | freeze
+  tune_gnn: false           # Stage 1: false, Stage 3: true
+  mol_representation: string_only   # string_only | string+graph
+  original_vocab_size: 126349       # LLaDA-8B tokenizer 기존 vocab 크기
+
+# ─────────────────────────────────────────────
+# LoRA
+# ─────────────────────────────────────────────
+lora:
+  r: 64
+  alpha: 32
+  dropout: 0.05
+  config_path: null         # lora config json 경로 (null이면 위 값으로 자동 생성)
+
+# ─────────────────────────────────────────────
+# Q-Former
+# ─────────────────────────────────────────────
+qformer:
+  num_query_token: 32       # LLM 입력에 삽입되는 graph token 수
+  bert_name: scibert        # scibert | bert-base-uncased
+  bert_hidden_dim: 768
+  cross_attention_freq: 2   # 매 N layer마다 cross-attention
+  num_layers: 5
+
+# ─────────────────────────────────────────────
+# Tokenizer
+# ─────────────────────────────────────────────
+tokenizer:
+  add_selfies_tokens: true
+  selfies_token_path: src/model/selfies_dict.txt
+
+# ─────────────────────────────────────────────
+# Training
+# ─────────────────────────────────────────────
+training:
+  max_steps: -1             # -1: epoch 기반
+  max_epochs: 3
+  batch_size: 4             # per-GPU batch size
+  accumulate_grad_batches: 32
+  # effective_batch_size = batch_size × devices × accumulate_grad_batches
+  optimizer: adamw
+  weight_decay: 0.1
+  gradient_clip_val: 1.0
+
+# ─────────────────────────────────────────────
+# Scheduler (WarmupStableDecay)
+# ─────────────────────────────────────────────
+#   LR
+#   │       ┌─────────────────────┐
+#   │      /   warmup    stable    \  decay(cosine)
+#   │_____/                         ───────────
+#   0   warmup_steps            (1-decay_ratio) × total_steps
+# ─────────────────────────────────────────────
+scheduler:
+  name: warmup_stable_decay_lr
+  warmup_steps: 50          # 0 → base_lr over first 50 iterations
+  warmup_lr: 0.0            # Start from 0 (linear warmup)
+  decay_ratio: 0.1          # Start decay in last 10% of training (base_lr → base_lr/10)
+  min_lr_ratio: 0.1         # Final LR = 10% of initial LR (min_lr_ratio = 0.1)
+
+# ─────────────────────────────────────────────
+# Learning Rate (per param group)
+# Stage마다 다르므로 각 stage yaml에서 설정
+# ─────────────────────────────────────────────
+lr:
+  lora: ???                 # LoRA 파라미터
+  embed_orig: ???           # embed_tokens (기존 vocab, idx < original_vocab_size)
+  embed_new: ???            # embed_tokens (신규 vocab); orig보다 높게 설정 권장
+  head_orig: ???            # lm_head (기존 vocab)
+  head_new: ???             # lm_head (신규 vocab)
+  other: ???                # Q-Former, GNN, query_tokens, opt_proj, ln_graph
+
+# ─────────────────────────────────────────────
+# Data Processing
+# ─────────────────────────────────────────────
+data:
+  truncation: true
+  padding: max_length
+  max_length: 512
+  gen_max_len: 256
+  min_len: 8
+
+# ─────────────────────────────────────────────
+# LLaDA Generation
+# ─────────────────────────────────────────────
+generation:
+  remasking_strategy: ['low_confidence', 'random']   # low_confidence | random
+  sampling_steps: 32
+  # validation 시 비교할 sampling 전략 목록
+  val_strategies: [random, semi_ar]
+  semi_ar:
+    enabled: false
+    block_size: 32
+    steps_per_block: 4
+
+# ─────────────────────────────────────────────
+# Validation / Test
+# ─────────────────────────────────────────────
+validation:
+  num_sanity_val_steps: 0
+  val_check_interval: 1.0   # epoch 끝에서만 실행 (1.0 = 1 epoch)
+  check_val_every_n_epoch: 1
+  limit_val_batches: 1.0
+  test_on_trainset: false
+  inference_batch_size: 8   # evaluation 전용 (gradient 불필요)
+
+# ─────────────────────────────────────────────
+# Logging & Checkpoint
+# ─────────────────────────────────────────────
+logging:
+  dir: ./checkpoint/stage1
+  log_every_n_steps: 10
+  save_on_n_steps: 500      # N step마다 중간 checkpoint 저장
+  save_top_k_checkpoints: -1
+  save_every_n_epochs: 1       # validation 끝날 때마다 checkpoint 저장
+  # validation sample logging (GPU당 N개 저장)
+  val_log_samples_per_gpu: 1
+  # step-wise denoising log (generation 과정 디버깅용)
+  log_stepwise_denoising: false
+  stepwise_max_samples: 8
+  # weight norm 모니터링 대상 layer
+  weight_norm_layers: [wte, ff_out, lora]
+  weight_norm_interval: 10
+  # NaN 발생 시 sample index, input_ids, task 기록
+  log_nan_details: true
+  nan_log_dir: ./nan_logs
