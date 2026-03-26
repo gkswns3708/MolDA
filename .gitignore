@@ -1,2 +1,10 @@
-./venvs/
-./dataset/*
+venvs/
+dataset/*
+hf-cache/
+lightning_logs/
+.hydra/
+logs/
+checkpoint/
+test/*.xml
+test/*.log
+test/*.ini
