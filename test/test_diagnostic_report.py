@@ -151,8 +151,8 @@ def main():
     L(f"| Total | {total_params:,} | 100% |")
     L(f"| Trainable | {trainable_params:,} | {trainable_params/total_params*100:.2f}% |")
     L(f"| LoRA | {lora_count:,} | {lora_count/total_params*100:.2f}% |")
-    L(f"| Embedding (wte) | {embed_count:,} | {embed_count/total_params*100:.2f}% |")
-    L(f"| Head (ff_out) | {head_count:,} | {head_count/total_params*100:.2f}% |")
+    L(f"| Embedding (wte, tied to output) | {embed_count:,} | {embed_count/total_params*100:.2f}% |")
+    L(f"| Head (ff_out, 0 if weight_tied) | {head_count:,} | {head_count/total_params*100:.2f}% |")
     L(f"| Frozen | {total_params - trainable_params:,} | {(total_params-trainable_params)/total_params*100:.2f}% |")
     L("")
 
@@ -440,11 +440,15 @@ def main():
         elif "lm_head" in name.lower() or "ff_out" in name.lower() or "output" in name.lower():
             head_params_list.append((name, param))
 
-    optimizer = torch.optim.AdamW([
+    param_groups = [
         {"params": [p for _, p in lora_params_list], "lr": cfg.lr.lora, "name": "lora"},
         {"params": [p for _, p in embed_params_list], "lr": cfg.lr.embed_orig, "name": "embed"},
-        {"params": [p for _, p in head_params_list], "lr": cfg.lr.head_orig, "name": "head"},
-    ], weight_decay=cfg.training.weight_decay)
+    ]
+    if head_params_list:
+        param_groups.append(
+            {"params": [p for _, p in head_params_list], "lr": cfg.lr.head_orig, "name": "head"}
+        )
+    optimizer = torch.optim.AdamW(param_groups, weight_decay=cfg.training.weight_decay)
 
     # ── BEFORE snapshot ──
     # Embedding layer
@@ -460,9 +464,15 @@ def main():
     emb_before_orig = emb_weight[:ORIGINAL_VOCAB_SIZE].detach().cpu().clone()
     emb_before_new = emb_weight[ORIGINAL_VOCAB_SIZE:].detach().cpu().clone()
 
-    # Output head (ff_out)
+    # Output head (weight_tying=True면 wte와 동일 텐서)
     output_emb = model.llada.model.get_output_embeddings()
-    if hasattr(output_emb, 'modules_to_save'):
+    weight_tied = (output_emb is input_emb) or (
+        hasattr(output_emb, 'original_module') and hasattr(input_emb, 'original_module')
+        and output_emb.original_module is input_emb.original_module
+    )
+    if weight_tied:
+        head_weight = emb_weight  # same tensor
+    elif hasattr(output_emb, 'modules_to_save'):
         head_weight = list(output_emb.modules_to_save.values())[0].weight
     elif hasattr(output_emb, 'original_module'):
         head_weight = output_emb.original_module.weight
@@ -509,10 +519,11 @@ def main():
         g = head_weight.grad.cpu().float()
         g_orig = g[:ORIGINAL_VOCAB_SIZE]
         g_new = g[ORIGINAL_VOCAB_SIZE:]
-        L(f"| Head/ff_out (orig vocab) | {g_orig.norm().item():.6e} | {g_orig.mean().item():.6e} | {g_orig.abs().max().item():.6e} |")
-        L(f"| Head/ff_out (new vocab) | {g_new.norm().item():.6e} | {g_new.mean().item():.6e} | {g_new.abs().max().item():.6e} |")
+        tied_tag = " (tied to wte)" if weight_tied else ""
+        L(f"| Head{tied_tag} (orig vocab) | {g_orig.norm().item():.6e} | {g_orig.mean().item():.6e} | {g_orig.abs().max().item():.6e} |")
+        L(f"| Head{tied_tag} (new vocab) | {g_new.norm().item():.6e} | {g_new.mean().item():.6e} | {g_new.abs().max().item():.6e} |")
     else:
-        L(f"| Head/ff_out | grad=None | — | — |")
+        L(f"| Head | grad=None | — | — |")
 
     if lora_a_param is not None and lora_a_param.grad is not None:
         g = lora_a_param.grad.cpu().float()
@@ -551,8 +562,9 @@ def main():
 
     report_change("Embedding (orig, idx < 126349)", emb_before_orig, emb_after_orig)
     report_change("Embedding (new,  idx >= 126349)", emb_before_new, emb_after_new)
-    report_change("Head/ff_out (orig, idx < 126349)", head_before_orig, head_after_orig)
-    report_change("Head/ff_out (new,  idx >= 126349)", head_before_new, head_after_new)
+    head_label = "Head/wte (tied)" if weight_tied else "Head/ff_out"
+    report_change(f"{head_label} (orig, idx < 126349)", head_before_orig, head_after_orig)
+    report_change(f"{head_label} (new,  idx >= 126349)", head_before_new, head_after_new)
     if lora_a_before is not None:
         report_change(f"LoRA_A (first layer)", lora_a_before, lora_a_after)
     if lora_b_before is not None:

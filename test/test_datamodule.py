@@ -5,7 +5,6 @@ import torch
 from torch.utils.data import DataLoader
 
 from src.data.datamodule import MolDADataModule
-from src.data.collator import EOS_TOKEN_ID, PAD_TOKEN_ID
 
 
 @pytest.mark.integration
@@ -62,21 +61,23 @@ class TestDataLoaders:
         assert "target_texts" in batch
         assert batch["prompt_input_ids"].ndim == 2
 
-    def test_train_batch_padding_token(self, dm):
+    def test_train_batch_padding_token(self, dm, real_tokenizer):
         dl = dm.train_dataloader()
         batch = next(iter(dl))
         ids = batch["input_ids"]
         attn = batch["attention_mask"]
+        eos_id = real_tokenizer.eos_token_id
         # Padding positions should be EOS
         pad_mask = (attn == 0)
         if pad_mask.any():
-            assert (ids[pad_mask] == EOS_TOKEN_ID).all()
+            assert (ids[pad_mask] == eos_id).all()
 
-    def test_val_batch_padding_token(self, dm):
+    def test_val_batch_padding_token(self, dm, real_tokenizer):
         dl = dm.val_dataloader()
         batch = next(iter(dl))
         ids = batch["prompt_input_ids"]
         attn = batch["prompt_attention_mask"]
+        pad_id = real_tokenizer.pad_token_id if real_tokenizer.pad_token_id is not None else real_tokenizer.eos_token_id
         pad_mask = (attn == 0)
         if pad_mask.any():
-            assert (ids[pad_mask] == PAD_TOKEN_ID).all()
+            assert (ids[pad_mask] == pad_id).all()
