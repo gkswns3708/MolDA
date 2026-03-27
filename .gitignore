@@ -1,5 +1,8 @@
 venvs/
 dataset/*
+!dataset/Train_toy100/
+!dataset/Val_toy100/
+!dataset/Test_toy100/
 hf-cache/
 lightning_logs/
 .hydra/
