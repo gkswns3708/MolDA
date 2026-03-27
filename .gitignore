@@ -8,3 +8,5 @@ checkpoint/
 test/*.xml
 test/*.log
 test/*.ini
+./claude
+docs/
