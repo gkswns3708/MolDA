@@ -185,19 +185,6 @@ class MolDATrainer(pl.LightningModule):
 
         return loss
 
-    def on_before_optimizer_step(self, optimizer):
-        """Manual scheduler step (not using PL's automatic scheduler)."""
-        _, scheduler = self.optimizers(), None
-        # Access our scheduler
-        if hasattr(self, "_scheduler"):
-            self._scheduler.step(self.global_step)
-
-    def on_fit_start(self):
-        """Store scheduler reference for manual stepping."""
-        opt_sched = self.configure_optimizers()
-        if isinstance(opt_sched, tuple) and len(opt_sched) == 2:
-            self._scheduler = opt_sched[1]
-
     # ─────────────────────────────────────────
     # Validation
     # ─────────────────────────────────────────

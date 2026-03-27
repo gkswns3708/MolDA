@@ -1,8 +1,10 @@
 """
 Data collators for MolDA training and evaluation.
 
-TrainCollator: right-pad with EOS (128001), build labels with -100 for prompt
-EvalCollator: left-pad with PAD (128002), return prompt-only for generation
+TrainCollator: right-pad with EOS (tokenizer.eos_token_id), build labels with -100 for prompt
+EvalCollator: left-pad with PAD (tokenizer.pad_token_id), return prompt-only for generation
+
+Token IDs are derived from the tokenizer at init time — not hardcoded.
 
 Reference: DATASET_SPEC.md, Old_MolDA/data_utils.py
 """
@@ -15,9 +17,6 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-# LLaDA token IDs
-EOS_TOKEN_ID = 128001
-PAD_TOKEN_ID = 128002
 GRAPH_PATTERN = re.compile(r"<GRAPH>.*?</GRAPH>", re.DOTALL)
 
 
@@ -29,6 +28,7 @@ class TrainCollator:
         self.tokenizer = tokenizer
         self.mol_representation = mol_representation
         self.max_length = max_length
+        self.eos_token_id = tokenizer.eos_token_id
 
     def __call__(self, batch: List[dict]) -> dict:
         input_ids_list = []
@@ -73,7 +73,7 @@ class TrainCollator:
 
         for ids, labs in zip(input_ids_list, labels_list):
             pad_len = self.max_length - len(ids)
-            padded_input_ids.append(ids + [EOS_TOKEN_ID] * pad_len)
+            padded_input_ids.append(ids + [self.eos_token_id] * pad_len)
             padded_labels.append(labs + [-100] * pad_len)
             padded_attention_mask.append([1] * len(ids) + [0] * pad_len)
 
@@ -94,6 +94,8 @@ class EvalCollator:
         self.tokenizer = tokenizer
         self.mol_representation = mol_representation
         self.max_length = max_length
+        # pad_token_id가 없으면 eos_token_id 사용 (LLaDA 기본 동작)
+        self.pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
 
     def __call__(self, batch: List[dict]) -> dict:
         prompt_ids_list = []
@@ -127,7 +129,7 @@ class EvalCollator:
 
         for ids in prompt_ids_list:
             pad_len = max_prompt_len - len(ids)
-            padded_prompt_ids.append([PAD_TOKEN_ID] * pad_len + ids)
+            padded_prompt_ids.append([self.pad_token_id] * pad_len + ids)
             padded_attention_mask.append([0] * pad_len + [1] * len(ids))
 
         return {

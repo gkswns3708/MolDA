@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from src.data.collator import TrainCollator, EvalCollator, EOS_TOKEN_ID, PAD_TOKEN_ID
+from src.data.collator import TrainCollator, EvalCollator
 
 
 def _make_samples(n=3, with_graph=False):
@@ -39,10 +39,16 @@ class TestTrainCollator:
         batch = collator(_make_samples(1))
         ids = batch["input_ids"][0]
         attn = batch["attention_mask"][0]
+        eos_id = real_tokenizer.eos_token_id
         # Find where padding starts
         pad_start = attn.sum().item()
         if pad_start < len(ids):
-            assert (ids[pad_start:] == EOS_TOKEN_ID).all()
+            assert (ids[pad_start:] == eos_id).all()
+
+    def test_eos_matches_tokenizer(self, real_tokenizer):
+        """Regression: collator EOS must match tokenizer.eos_token_id."""
+        collator = TrainCollator(real_tokenizer, max_length=256)
+        assert collator.eos_token_id == real_tokenizer.eos_token_id
 
     def test_labels_prompt_masked(self, real_tokenizer):
         collator = TrainCollator(real_tokenizer, max_length=256)
@@ -109,6 +115,7 @@ class TestEvalCollator:
 
     def test_left_padding_with_pad(self, real_tokenizer):
         collator = EvalCollator(real_tokenizer, max_length=256)
+        pad_id = collator.pad_token_id
         # Create samples with different prompt lengths
         samples = [
             {"prompt_text": "Short prompt.", "target_text": "yes", "task": "t1", "input_mol_string": ""},
@@ -117,8 +124,14 @@ class TestEvalCollator:
         batch = collator(samples)
         ids = batch["prompt_input_ids"]
         # Shorter prompt should have PAD at the beginning
-        shorter_idx = 0 if ids[0].ne(PAD_TOKEN_ID).sum() < ids[1].ne(PAD_TOKEN_ID).sum() else 1
-        assert ids[shorter_idx][0] == PAD_TOKEN_ID
+        shorter_idx = 0 if ids[0].ne(pad_id).sum() < ids[1].ne(pad_id).sum() else 1
+        assert ids[shorter_idx][0] == pad_id
+
+    def test_pad_matches_tokenizer(self, real_tokenizer):
+        """Regression: collator PAD must derive from tokenizer."""
+        collator = EvalCollator(real_tokenizer, max_length=256)
+        expected = real_tokenizer.pad_token_id if real_tokenizer.pad_token_id is not None else real_tokenizer.eos_token_id
+        assert collator.pad_token_id == expected
 
     def test_attention_mask_correct(self, real_tokenizer):
         collator = EvalCollator(real_tokenizer, max_length=256)

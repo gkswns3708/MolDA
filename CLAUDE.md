@@ -67,12 +67,18 @@ New_MolDA/
     └── test_ddp.py
 ```
 
-## 현재 구현 상태 (2026-03-24 기준)
+## 현재 구현 상태 (2026-03-27 기준, v0.2.0 완료)
 - [x] `src/official_LLaDA/` — 수정 없이 유지
 - [x] `scripts/run_infer_llada_official.py`
 - [x] Toy dataset 3-split (`dataset/*_toy100/`)
-- [x] `src/configs/` — Hydra config 뼈대 (초안, LR은 TBD)
-- [ ] src/data/, src/model/, src/training/, src/generation/, scripts/train.py, tests/
+- [x] `src/configs/` — Hydra config (default, stage1/2/3, toy100, gnn, test)
+- [x] `src/data/` — Dataset, DataModule, TrainCollator, EvalCollator
+- [x] `src/model/` — MolDA, LLaDAWrapper (LoRA + vocab expansion), GNN/QFormer stubs
+- [x] `src/training/` — MolDATrainer, MaskedDiffusionLoss, Metrics, WSD Scheduler
+- [x] `src/generation/` — generate wrapper + generate_with_logging
+- [x] `src/logging/` — ValidationSampleLogger, StepwiseLogger
+- [x] `scripts/train.py` — Hydra entry point
+- [x] `test/` — 13 test files (unit + integration + e2e)
 
 ## 핵심 설계 원칙
 1. **`src/official_LLaDA/generate.py` 수정 금지.** 래핑만 허용.

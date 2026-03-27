@@ -6,14 +6,25 @@
     3. on_validation_epoch_end   → flush()
 """
 
-import json
 import logging
 import os
-from typing import List, Optional
+import re
 
 import torch
 
 logger = logging.getLogger(__name__)
+
+_BOOLEAN_PATTERN = re.compile(r"<BOOLEAN>\s*(True|False)\s*</BOOLEAN>", re.IGNORECASE)
+
+
+def _parse_boolean_label(label: str) -> bool:
+    """Extract True/False from '<BOOLEAN> True </BOOLEAN>' style label text."""
+    m = _BOOLEAN_PATTERN.search(label)
+    if m:
+        return m.group(1).strip().lower() == "true"
+    # Fallback: look for bare True/False
+    lower = label.lower()
+    return "true" in lower and "false" not in lower
 
 
 class ValidationSampleLogger:
@@ -36,17 +47,21 @@ class ValidationSampleLogger:
         Args:
             task: task 이름 (e.g., "BBBP", "HIV")
             prob: [2] tensor — [prob_false, prob_true]
-            label: 정답 텍스트 ("Yes" / "No")
+            label: 정답 텍스트 (e.g., "<BOOLEAN> True </BOOLEAN>" or "<BOOLEAN> True </BOOLEAN><|eot_id|>")
         """
         if len(self._cls_samples) >= self.samples_per_gpu:
             return
-        pred_label = "Yes" if prob[1].item() > prob[0].item() else "No"
+        pred_true = prob[1].item() > prob[0].item()
+        # Parse ground truth from <BOOLEAN> tag
+        gt_true = _parse_boolean_label(label)
+        correct = pred_true == gt_true
+        pred_label = "True" if pred_true else "False"
         self._cls_samples.append({
             "task": task,
             "target": label,
             "prediction": pred_label,
             "prob_true": round(prob[1].item(), 4),
-            "correct": pred_label == label,
+            "correct": correct,
         })
 
     def collect_generation(self, task: str, pred: str, label: str, strategy: str = ""):

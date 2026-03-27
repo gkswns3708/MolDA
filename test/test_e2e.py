@@ -202,7 +202,7 @@ class TestDataModelIntegration:
     def test_eval_collator_shapes(self, molda_model, cfg):
         """Eval DataLoader 배치의 left-padding 및 shape 검증."""
         from src.data.datamodule import MolDADataModule
-        from src.data.collator import PAD_TOKEN_ID
+        from src.data.collator import EvalCollator
 
         dm = MolDADataModule(tokenizer=molda_model.tokenizer, cfg=cfg)
         dm.setup("fit")
@@ -213,10 +213,12 @@ class TestDataModelIntegration:
         assert "prompt_attention_mask" in batch
         assert "target_texts" in batch
 
-        # Left-padding 확인
+        # Left-padding 확인: PAD ID는 토크나이저에서 파생
+        eval_collator = EvalCollator(molda_model.tokenizer, max_length=cfg.data.max_length)
+        pad_id = eval_collator.pad_token_id
         pad_mask = (batch["prompt_attention_mask"] == 0)
         if pad_mask.any():
-            assert (batch["prompt_input_ids"][pad_mask] == PAD_TOKEN_ID).all()
+            assert (batch["prompt_input_ids"][pad_mask] == pad_id).all()
 
 
 # ─────────────────────────────────────────

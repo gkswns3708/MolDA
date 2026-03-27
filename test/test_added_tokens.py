@@ -3,13 +3,13 @@
 검증 대상:
 - src/model/added_tokens.py — 태그 토큰 정의
 - src/training/loss.py — MASK_TOKEN_ID
-- src/data/collator.py — EOS_TOKEN_ID, PAD_TOKEN_ID
+- src/data/collator.py — TrainCollator, EvalCollator (토크나이저 기반 EOS/PAD)
 - 실제 토크나이저 — 토큰 등록 및 인덱스 경계
 """
 
 from src.model import added_tokens
 from src.training.loss import MASK_TOKEN_ID
-from src.data.collator import EOS_TOKEN_ID, PAD_TOKEN_ID
+from src.data.collator import TrainCollator, EvalCollator
 
 
 def _all_tokens():
@@ -78,22 +78,9 @@ class TestLLaDATokenIDs:
         """<|mdm_mask|> = 126336 (LLaDA 공식 값)."""
         assert MASK_TOKEN_ID == 126336
 
-    def test_collator_eos_token_id(self):
-        """collator에서 사용하는 EOS = 128001."""
-        assert EOS_TOKEN_ID == 128001
-
-    def test_collator_pad_token_id(self):
-        """collator에서 사용하는 PAD = 128002."""
-        assert PAD_TOKEN_ID == 128002
-
     def test_mask_within_original_vocab(self):
         """MASK 토큰은 기본 vocab 범위(< 126349) 안에 있다."""
         assert MASK_TOKEN_ID < ORIGINAL_VOCAB_SIZE
-
-    def test_special_ids_are_distinct(self):
-        """MASK, EOS(collator), PAD(collator)는 서로 다르다."""
-        ids = {MASK_TOKEN_ID, EOS_TOKEN_ID, PAD_TOKEN_ID}
-        assert len(ids) == 3, f"Special token IDs collide: {ids}"
 
 
 class TestTokenizerIntegration:
@@ -109,15 +96,16 @@ class TestTokenizerIntegration:
         # LLaDA 토크나이저는 기본적으로 pad=eos
         assert real_tokenizer.pad_token_id == real_tokenizer.eos_token_id
 
-    def test_collator_eos_vs_tokenizer_eos(self, real_tokenizer):
-        """collator EOS(128001) ≠ 토크나이저 eos(126081).
+    def test_collator_eos_matches_tokenizer(self, real_tokenizer, cfg):
+        """Regression: collator EOS는 토크나이저 eos_token_id와 일치해야 한다."""
+        collator = TrainCollator(real_tokenizer, max_length=cfg.data.max_length)
+        assert collator.eos_token_id == real_tokenizer.eos_token_id
 
-        collator는 Old_MolDA에서 가져온 별도 상수를 사용.
-        토크나이저의 실제 eos_token_id와 다르므로, 이 차이를 인지하고 있어야 한다.
-        """
-        assert real_tokenizer.eos_token_id != EOS_TOKEN_ID, (
-            "collator EOS와 tokenizer eos가 같아졌다면 collator 상수 업데이트 필요"
-        )
+    def test_collator_pad_derives_from_tokenizer(self, real_tokenizer, cfg):
+        """Regression: collator PAD는 토크나이저 pad_token_id에서 파생되어야 한다."""
+        collator = EvalCollator(real_tokenizer, max_length=cfg.data.max_length)
+        expected = real_tokenizer.pad_token_id if real_tokenizer.pad_token_id is not None else real_tokenizer.eos_token_id
+        assert collator.pad_token_id == expected
 
     def test_mask_token_decodable(self, real_tokenizer):
         """MASK 토큰 ID(126336)가 디코딩 가능."""
