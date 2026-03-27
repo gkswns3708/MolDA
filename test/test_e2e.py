@@ -31,11 +31,14 @@ def optimizer_and_scheduler(molda_model, cfg):
         elif "lm_head" in name.lower() or "ff_out" in name.lower() or "output" in name.lower():
             head_params.append(param)
 
-    optimizer = torch.optim.AdamW([
+    param_groups = [
         {"params": lora_params, "lr": cfg.lr.lora, "name": "lora"},
         {"params": embed_params, "lr": cfg.lr.embed_orig, "name": "embed"},
-        {"params": head_params, "lr": cfg.lr.head_orig, "name": "head"},
-    ], weight_decay=cfg.training.weight_decay)
+    ]
+    if head_params:
+        param_groups.append({"params": head_params, "lr": cfg.lr.head_orig, "name": "head"})
+
+    optimizer = torch.optim.AdamW(param_groups, weight_decay=cfg.training.weight_decay)
 
     scheduler = WarmupStableDecayLRScheduler(
         optimizer, max_step=100, warmup_steps=10,
