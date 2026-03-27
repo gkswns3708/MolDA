@@ -87,8 +87,8 @@ lr:
   lora: ???                 # LoRA 파라미터
   embed_orig: ???           # embed_tokens (기존 vocab, idx < original_vocab_size)
   embed_new: ???            # embed_tokens (신규 vocab); orig보다 높게 설정 권장
-  head_orig: ???            # lm_head (기존 vocab)
-  head_new: ???             # lm_head (신규 vocab)
+  head_orig: ???            # lm_head — weight_tying=True면 별도 ff_out 없어 사용 안 됨
+  head_new: ???             # lm_head — weight_tying=True면 별도 ff_out 없어 사용 안 됨
   other: ???                # Q-Former, GNN, query_tokens, opt_proj, ln_graph
 
 # ─────────────────────────────────────────────
@@ -140,7 +140,7 @@ logging:
   log_stepwise_denoising: false
   stepwise_max_samples: 8
   # weight norm 모니터링 대상 layer
-  weight_norm_layers: [wte, ff_out, lora]
+  weight_norm_layers: [wte, lora]
   weight_norm_interval: 10
   # NaN 발생 시 sample index, input_ids, task 기록
   log_nan_details: true

@@ -25,15 +25,11 @@ lr:
                             # Same as embed_orig
                             # Schedule: 0 → 2.5e-5 (50 iter) → 2.5e-6 (decay)
 
-  head_orig: 2.5e-5         # lm_head/ff_out (기존 vocab)
-                            # Schedule: 0 → 2.5e-5 (50 iter) → 2.5e-6 (decay)
-
-  head_new: 2.5e-5          # lm_head/ff_out (신규 vocab)
-                            # Same as head_orig
-                            # Schedule: 0 → 2.5e-5 (50 iter) → 2.5e-6 (decay)
+  head_orig: 2.5e-5         # weight_tying=True: 별도 ff_out 없어 사용 안 됨
+  head_new: 2.5e-5          # weight_tying=True: 별도 ff_out 없어 사용 안 됨
 
   other: 0.0                # Q-Former/GNN frozen in Stage 1
 
 logging:
   dir: ./checkpoint/stage1
-  weight_norm_layers: [wte, ff_out, lora]
+  weight_norm_layers: [wte, lora]

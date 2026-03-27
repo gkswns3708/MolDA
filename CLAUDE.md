@@ -88,7 +88,7 @@ New_MolDA/
 5. **Train collator = right padding(EOS), Eval collator = left padding(PAD).**
 6. **Loss NaN 발생 시 sample index, input_ids, task를 log에 기록.**
 7. **Optimizer 5 param groups: LoRA / embed_orig / embed_new / head_orig+new / Q-Former+GNN.**
-8. **LLaDA 레이어 이름: embedding=`wte`, lm_head=`ff_out` (표준 LLaMA와 다름).**
+8. **LLaDA 레이어 이름: embedding=`wte`, lm_head=`ff_out` (표준 LLaMA와 다름). weight_tying=True로 override하여 wte가 output에도 사용됨.**
 9. **파이프라인 로직 변경 시 반드시 관련 테스트 코드를 `tests/`에 작성/업데이트한다.** (상세: `.claude/rules/testing.md`)
 
 ## 참고 구현 (Old_MolDA)

@@ -1,6 +1,6 @@
 # @package _global_
 # Stage 3: Full Multimodal Fine-tuning (+ MolPO optional)
-# Trainable: LoRA + wte(embed) + ff_out(head) + Q-Former + GNN
+# Trainable: LoRA + wte(embed, tied to output) + Q-Former + GNN
 # Frozen:    LLM base weights만
 defaults:
   - default
@@ -21,8 +21,8 @@ lr:
   lora: ???
   embed_orig: ???
   embed_new: ???            # Stage 1보다 낮게 설정 권장
-  head_orig: ???
-  head_new: ???
+  head_orig: ???            # weight_tying=True: 별도 ff_out 없어 사용 안 됨
+  head_new: ???             # weight_tying=True: 별도 ff_out 없어 사용 안 됨
   other: ???                # Q-Former, GNN, query_tokens, opt_proj, ln_graph
 
 # ─────────────────────────────────────────────
@@ -49,5 +49,5 @@ validation:
 
 logging:
   dir: ./checkpoint/stage3
-  # LLaDA layer names: wte=embedding, ff_out=lm_head
-  weight_norm_layers: [wte, ff_out, gnn, Qformer, lora]
+  # LLaDA layer names: wte=embedding (weight_tying=True, tied to output)
+  weight_norm_layers: [wte, gnn, Qformer, lora]

@@ -43,7 +43,7 @@ case "$RUN_MODE" in
             2>&1 | tee "${TEST_DIR}/test_output_fast.log"
         ;;
     all)
-        echo "[Mode] All tests (CPU first, then GPU)"
+        echo "[Mode] All tests (CPU → GPU → Diagnostic Report)"
         echo ""
         echo "── Phase 1: CPU-only tests ──"
         python -m pytest "${TEST_DIR}" -m "not gpu" -v --tb=short \
@@ -59,13 +59,20 @@ case "$RUN_MODE" in
         GPU_EXIT=${PIPESTATUS[0]}
 
         echo ""
+        echo "── Phase 3: Diagnostic Report ──"
+        python "${TEST_DIR}/test_diagnostic_report.py" \
+            2>&1 | tee "${TEST_DIR}/test_output_diagnostic.log"
+        DIAG_EXIT=${PIPESTATUS[0]}
+
+        echo ""
         echo "=============================================="
         echo "Summary:"
-        echo "  CPU tests exit code: ${CPU_EXIT}"
-        echo "  GPU tests exit code: ${GPU_EXIT}"
+        echo "  CPU tests exit code:        ${CPU_EXIT}"
+        echo "  GPU tests exit code:        ${GPU_EXIT}"
+        echo "  Diagnostic report exit code: ${DIAG_EXIT}"
         echo "=============================================="
 
-        [ ${CPU_EXIT} -eq 0 ] && [ ${GPU_EXIT} -eq 0 ]
+        [ ${CPU_EXIT} -eq 0 ] && [ ${GPU_EXIT} -eq 0 ] && [ ${DIAG_EXIT} -eq 0 ]
         ;;
     single)
         # Run a single test file: ./run_tests.sh single test_loss.py

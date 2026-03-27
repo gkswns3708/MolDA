@@ -40,14 +40,12 @@ class TestLLaDAWrapper:
     def test_trainable_params_exist(self, llada_wrapper):
         trainable = [(n, p) for n, p in llada_wrapper.model.named_parameters() if p.requires_grad]
         assert len(trainable) > 0, "No trainable parameters"
-        # Should include lora, wte, ff_out
+        # Should include lora, wte (weight_tying=True: wte = output head)
         names = [n for n, _ in trainable]
         has_lora = any("lora_" in n for n in names)
         has_embed = any("wte" in n or "embed" in n for n in names)
-        has_head = any("ff_out" in n for n in names)
         assert has_lora, "No LoRA parameters are trainable"
         assert has_embed, "No embedding parameters are trainable"
-        assert has_head, "No head (ff_out) parameters are trainable"
 
     def test_frozen_base_weights(self, llada_wrapper):
         """Base attention/MLP weights (non-LoRA) should be frozen."""
