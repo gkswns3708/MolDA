@@ -1,6 +1,6 @@
 [submodule "src/official_LLaDA"]
 	path = src/official_LLaDA
-	url = https://github.com/gkswns3708/MolDA.git
+	url = https://github.com/ML-GSAI/LLaDA.git
 [submodule "src/SMDM"]
 	path = src/SMDM
 	url = https://github.com/ML-GSAI/SMDM.git
