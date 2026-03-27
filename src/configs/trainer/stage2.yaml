@@ -28,8 +28,8 @@ lr:
   lora: 0.0                 # frozen
   embed_orig: 0.0           # frozen
   embed_new: 0.0            # frozen
-  head_orig: 0.0            # frozen
-  head_new: 0.0             # frozen
+  head_orig: 0.0            # weight_tying=True: 별도 ff_out 없음 (frozen)
+  head_new: 0.0             # weight_tying=True: 별도 ff_out 없음 (frozen)
   other: ???                # Q-Former, query_tokens, opt_proj, ln_graph
 
 validation:

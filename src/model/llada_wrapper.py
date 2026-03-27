@@ -3,10 +3,10 @@ LLaDA model wrapper: tokenizer + model loading + LoRA + vocab expansion.
 
 Responsibilities:
 1. Load tokenizer + add special tokens (added_tokens.py + selfies_dict.txt)
-2. Load LLaDA model (AutoModelForCausalLM)
+2. Load LLaDA model (AutoModelForCausalLM) with weight_tying=True override
 3. Resize embeddings with mean + std*randn initialization for new tokens
 4. Apply LoRA via PEFT
-5. Set trainability: LoRA + wte + ff_out trainable, rest frozen
+5. Set trainability: LoRA + wte(tied to output) trainable, rest frozen
 
 Reference: Old_MolDA/model/blip2_llada.py (check_and_add_special_tokens, set_llm_model)
 """
@@ -17,7 +17,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 from peft import LoraConfig, get_peft_model
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from src.model import added_tokens
 
@@ -40,24 +40,31 @@ class LLaDAWrapper(nn.Module):
         n_added = self._add_special_tokens()
         logger.info(f"Added {n_added} special tokens. Vocab: {len(self._tokenizer)}")
 
-        # 3. Load model
+        # 3. Load model with weight_tying=True override
+        #    - mol_llm_official(OPT/Galactica)과 변인통제: tie_word_embeddings=True
+        #    - LLaDA checkpoint은 weight_tying=False로 저장됨 → True로 override
+        #    - ff_out weight는 버려지고, wte가 input+output 모두 담당
+        llm_config = AutoConfig.from_pretrained(
+            cfg.model.llm, trust_remote_code=True
+        )
+        llm_config.weight_tying = True
         self._model = AutoModelForCausalLM.from_pretrained(
             cfg.model.llm,
+            config=llm_config,
             torch_dtype=torch.bfloat16,
             trust_remote_code=True,
         )
 
-        # 4. Resize embeddings (input + output) with mean init
+        # 4. Resize embeddings with mean init
+        #    weight_tying=True → output은 wte를 재사용하므로 input만 resize하면 됨
         self._resize_embeddings_mean()
 
-        # 5. Apply LoRA
+        # 5. Apply LoRA (wte는 modules_to_save로 trainable)
         self._apply_lora()
 
-        # 6. Unfreeze output head (ff_out) — PEFT 밖에서 수동 관리
-        self._unfreeze_output_head()
-
-        # 7. Log trainable parameters
-        logger.info("wte managed by PEFT modules_to_save, ff_out manually unfrozen")
+        # 6. Log trainable parameters
+        #    weight_tying=True: wte 학습 = output logits도 자동 업데이트
+        logger.info("weight_tying=True: wte managed by PEFT modules_to_save (tied to output)")
 
     @property
     def tokenizer(self):
@@ -170,9 +177,8 @@ class LLaDAWrapper(nn.Module):
                 "q_proj", "k_proj", "v_proj", "o_proj",
                 "gate_proj", "up_proj", "down_proj",
             ],
-            # wte(input embed)만 PEFT modules_to_save로 관리.
-            # ff_out은 modules_to_save에 넣으면 block-level ff_out(32개)까지
-            # 매칭되어 의도치 않게 trainable이 되므로 수동으로 처리한다.
+            # wte(input embed)를 PEFT modules_to_save로 관리.
+            # weight_tying=True이므로 wte가 output logits에도 사용됨 → 별도 ff_out 불필요.
             modules_to_save=["wte"],
             bias="none",
         )
@@ -180,20 +186,4 @@ class LLaDAWrapper(nn.Module):
         logger.info(f"LoRA applied: r={lora_cfg.r}, alpha={lora_cfg.alpha}")
         self._model.print_trainable_parameters()
 
-    def _unfreeze_output_head(self):
-        """Output head(transformer.ff_out)만 trainable로 설정.
-
-        PEFT modules_to_save에 "ff_out"을 넣으면 block-level ff_out(32개)까지
-        매칭되므로, output head만 수동으로 requires_grad=True 설정한다.
-        """
-        output_head = self._model.get_output_embeddings()
-        if output_head is None:
-            logger.warning("No output embeddings found — skipping unfreeze")
-            return
-
-        n_unfrozen = 0
-        for param in output_head.parameters():
-            param.requires_grad = True
-            n_unfrozen += param.numel()
-        logger.info(f"Output head unfrozen: {n_unfrozen:,} params")
 

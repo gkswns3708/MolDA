@@ -74,7 +74,7 @@ class MolDATrainer(pl.LightningModule):
     # ─────────────────────────────────────────
 
     def configure_optimizers(self):
-        """5 param groups: LoRA / embed_orig / embed_new / head / other."""
+        """Param groups: LoRA / embed / head(optional) / other."""
         cfg = self.cfg
         lr = cfg.lr
         orig_vocab_size = cfg.model.original_vocab_size
@@ -105,8 +105,13 @@ class MolDATrainer(pl.LightningModule):
         param_groups = [
             {"params": lora_params, "lr": lr.lora, "name": "lora"},
             {"params": embed_orig_params, "lr": lr.embed_orig, "name": "embed"},
-            {"params": head_params, "lr": lr.head_orig, "name": "head"},
         ]
+
+        # head group: weight_tying=True면 별도 ff_out이 없어 비어있을 수 있음
+        if head_params:
+            param_groups.append(
+                {"params": head_params, "lr": lr.head_orig, "name": "head"}
+            )
 
         # Only add other group if there are params (Stage 2+)
         if other_params and lr.other > 0:
