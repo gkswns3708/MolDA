@@ -263,7 +263,7 @@ class MolDATrainer(pl.LightningModule):
                 # Stepwise logging 조건: enabled + max_samples 이내
                 if self._stepwise_logger and self._stepwise_logger.should_log():
                     from src.generation.generate import generate_with_logging
-                    pred_ids, snapshots = generate_with_logging(
+                    pred_ids, snapshots, _ = generate_with_logging(
                         self.model.llada.model,
                         gen_prompt_ids,
                         attention_mask=gen_prompt_mask,
