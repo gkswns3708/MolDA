@@ -12,30 +12,44 @@ from src.training.loss import MASK_TOKEN_ID
 from src.data.collator import TrainCollator, EvalCollator
 
 
-def _all_tokens():
-    """Collect all tokens from all lists."""
+def _base_tokens():
+    """Base special tokens (항상 추가, mol repr tag 제외)."""
     return (
         added_tokens.BOOL + added_tokens.FLOAT + added_tokens.DESCRIPTION
-        + added_tokens.SELFIES + added_tokens.MOL_2D + added_tokens.MOL_3D
+        + added_tokens.MOL_2D + added_tokens.MOL_3D
         + added_tokens.MOL_EMBEDDING + added_tokens.NUMBER
         + added_tokens.INSTRUCTION + added_tokens.REACTION_DIRECTION
         + added_tokens.IUPAC + added_tokens.MOLFORMULA
     )
 
 
+def _config_tokens(mol_token_type: str):
+    """Config에 따라 실제 추가되는 토큰 목록."""
+    base = _base_tokens()
+    if mol_token_type == "selfies":
+        return base + added_tokens.SELFIES
+    elif mol_token_type == "smiles":
+        return base + added_tokens.SMILES
+    raise ValueError(f"Unknown mol_token_type: {mol_token_type}")
+
+
 # ── LLaDA 기본 토큰 상수 ──
 ORIGINAL_VOCAB_SIZE = 126349
+BASE_TOKEN_COUNT = 31       # 태그 쌍 8×2=16 + NUMBER 13 + <mol> 1 + |>>| 1
+MOL_REPR_TAG_COUNT = 2      # <SELFIES></SELFIES> 또는 <SMILES></SMILES>
 
 
 class TestAddedTokens:
     """added_tokens.py 정의 자체의 무결성."""
 
     def test_all_tokens_are_strings(self):
-        for token in _all_tokens():
+        all_tok = _base_tokens() + added_tokens.SELFIES + added_tokens.SMILES
+        for token in all_tok:
             assert isinstance(token, str), f"Token {token!r} is not a string"
 
-    def test_no_duplicate_tokens(self):
-        all_tok = _all_tokens()
+    def test_no_duplicate_across_all_definitions(self):
+        """SELFIES/SMILES 포함 전체 정의에서 중복 없음."""
+        all_tok = _base_tokens() + added_tokens.SELFIES + added_tokens.SMILES
         assert len(all_tok) == len(set(all_tok)), (
             f"Duplicate tokens found: {[t for t in all_tok if all_tok.count(t) > 1]}"
         )
@@ -43,7 +57,8 @@ class TestAddedTokens:
     def test_paired_tags_have_open_and_close(self):
         paired = [
             added_tokens.BOOL, added_tokens.FLOAT, added_tokens.DESCRIPTION,
-            added_tokens.SELFIES, added_tokens.MOL_2D, added_tokens.MOL_3D,
+            added_tokens.SELFIES, added_tokens.SMILES,
+            added_tokens.MOL_2D, added_tokens.MOL_3D,
             added_tokens.INSTRUCTION, added_tokens.IUPAC, added_tokens.MOLFORMULA,
         ]
         for pair in paired:
@@ -66,9 +81,14 @@ class TestAddedTokens:
     def test_reaction_direction_token(self):
         assert "|>>|" in added_tokens.REACTION_DIRECTION
 
-    def test_added_token_count(self):
-        """태그 토큰 총 33개: 태그 쌍 9×2=18 + NUMBER 13 + <mol> 1 + |>>| 1 = 33."""
-        assert len(_all_tokens()) == 33
+    def test_base_token_count(self):
+        """Base 토큰 31개: 태그 쌍 8×2=16 + NUMBER 13 + <mol> 1 + |>>| 1."""
+        assert len(_base_tokens()) == BASE_TOKEN_COUNT
+
+    def test_config_token_count(self):
+        """Config 선택 후 총 33개: base 31 + mol repr tag 2."""
+        assert len(_config_tokens("selfies")) == BASE_TOKEN_COUNT + MOL_REPR_TAG_COUNT
+        assert len(_config_tokens("smiles")) == BASE_TOKEN_COUNT + MOL_REPR_TAG_COUNT
 
 
 class TestLLaDATokenIDs:
@@ -84,7 +104,7 @@ class TestLLaDATokenIDs:
 
 
 class TestTokenizerIntegration:
-    """실제 토크나이저에서 토큰 등록 및 인덱스 경계 검증."""
+    """실제 토크나이저에서 토큰 등록 및 인덱스 경계 검증 (config 기반)."""
 
     def test_tokenizer_eos_token(self, real_tokenizer):
         """토크나이저의 eos = <|endoftext|> (id=126081)."""
@@ -93,7 +113,6 @@ class TestTokenizerIntegration:
 
     def test_tokenizer_pad_token(self, real_tokenizer):
         """토크나이저 기본 pad = eos와 동일 (<|endoftext|>)."""
-        # LLaDA 토크나이저는 기본적으로 pad=eos
         assert real_tokenizer.pad_token_id == real_tokenizer.eos_token_id
 
     def test_collator_eos_matches_tokenizer(self, real_tokenizer, cfg):
@@ -117,19 +136,21 @@ class TestTokenizerIntegration:
         decoded = real_tokenizer.decode([MASK_TOKEN_ID]).strip()
         assert "mdm_mask" in decoded, f"Expected '<|mdm_mask|>', got {decoded!r}"
 
-    def test_added_tokens_start_at_original_vocab(self, real_tokenizer):
+    def test_added_tokens_start_at_original_vocab(self, real_tokenizer, cfg):
         """추가된 토큰의 ID는 original_vocab_size(126349)부터 시작."""
-        for token_str in _all_tokens():
+        tokens = _config_tokens(cfg.tokenizer.mol_token_type)
+        for token_str in tokens:
             token_id = real_tokenizer.convert_tokens_to_ids(token_str)
             assert token_id >= ORIGINAL_VOCAB_SIZE, (
                 f"Added token {token_str!r} has id {token_id} "
                 f"< original_vocab_size {ORIGINAL_VOCAB_SIZE}"
             )
 
-    def test_added_tokens_contiguous(self, real_tokenizer):
+    def test_added_tokens_contiguous(self, real_tokenizer, cfg):
         """추가된 태그 토큰들의 ID가 126349부터 연속 블록으로 할당."""
+        tokens = _config_tokens(cfg.tokenizer.mol_token_type)
         ids = sorted(
-            real_tokenizer.convert_tokens_to_ids(t) for t in _all_tokens()
+            real_tokenizer.convert_tokens_to_ids(t) for t in tokens
         )
         expected_start = ORIGINAL_VOCAB_SIZE
         assert ids[0] == expected_start, (
@@ -149,12 +170,11 @@ class TestTokenizerIntegration:
         unk_id = real_tokenizer.convert_tokens_to_ids("<unk>")
         assert mol_id != unk_id, "<mol> resolved to <unk>"
 
-    def test_original_vocab_boundary(self, real_tokenizer):
+    def test_original_vocab_boundary(self, real_tokenizer, cfg):
         """original_vocab_size 경계: idx 126348은 기존 토큰, 126349는 추가 토큰."""
-        # 126348(마지막 기존 토큰)은 added_tokens에 없어야 한다
+        tokens = _config_tokens(cfg.tokenizer.mol_token_type)
         added_ids = {
-            real_tokenizer.convert_tokens_to_ids(t) for t in _all_tokens()
+            real_tokenizer.convert_tokens_to_ids(t) for t in tokens
         }
         assert 126348 not in added_ids
-        # 126349(첫 추가 토큰)는 added_tokens 중 하나여야 한다
         assert ORIGINAL_VOCAB_SIZE in added_ids

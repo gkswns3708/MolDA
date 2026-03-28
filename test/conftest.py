@@ -2,10 +2,12 @@
 Shared fixtures and markers for MolDA test suite.
 
 Uses OmegaConf (not Hydra) to avoid GlobalHydra state conflicts in pytest.
+Config is loaded from actual yaml files, mimicking Hydra composition.
 """
 
 import os
 import sys
+from pathlib import Path
 
 import pytest
 import torch
@@ -16,6 +18,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+CONFIG_DIR = Path(PROJECT_ROOT) / "src" / "configs"
 DATASET_ROOT = os.path.join(PROJECT_ROOT, "dataset")
 
 # ── HuggingFace cache ──
@@ -39,119 +42,79 @@ def pytest_collection_modifyitems(config, items):
                 item.add_marker(skip_gpu)
 
 
-# ── Config fixture (OmegaConf, NOT Hydra) ──
+# ── Config loading (OmegaConf yaml merge, NOT Hydra) ──
 
-@pytest.fixture(scope="session")
-def cfg():
-    """Minimal config matching toy.yaml + default.yaml + stage1.yaml."""
-    return OmegaConf.create({
-        "seed": 42,
-        "mode": "ft",
-        "stage": 1,
-        "debug": False,
-        "ckpt_path": None,
-        "model": {
-            "llm": "GSAI-ML/LLaDA-8B-Instruct",
-            "tune_llm": "lora",
-            "tune_gnn": False,
-            "mol_representation": "string_only",
-            "original_vocab_size": 126349,
-        },
-        "lora": {
-            "r": 64,
-            "alpha": 32,
-            "dropout": 0.05,
-            "config_path": None,
-        },
+def load_config(config_name: str = "toy_SELFIES") -> OmegaConf:
+    """Load config by merging yaml files, mimicking Hydra composition.
+
+    Merge order:
+        default.yaml → stage.yaml → data.yaml → top-level.yaml → test overrides
+
+    Args:
+        config_name: Top-level config name (e.g. "toy_SELFIES", "toy_SMILES")
+    """
+    # 1. Parse top-level config to find trainer/data defaults
+    top_raw = OmegaConf.load(CONFIG_DIR / f"{config_name}.yaml")
+    trainer_name = "stage1"
+    data_name = None
+    for item in OmegaConf.to_container(top_raw.get("defaults", [])):
+        if isinstance(item, dict):
+            if "trainer" in item:
+                trainer_name = item["trainer"]
+            elif "data" in item:
+                data_name = item["data"]
+
+    # 2. Trainer configs: default → stage override
+    base = OmegaConf.load(CONFIG_DIR / "trainer" / "default.yaml")
+    stage = OmegaConf.load(CONFIG_DIR / "trainer" / f"{trainer_name}.yaml")
+    if "defaults" in stage:
+        OmegaConf.update(stage, "defaults", None)
+        del stage["defaults"]
+
+    # 3. Data config (keys go under data.*)
+    data_overlay = {}
+    if data_name:
+        data_overlay = {"data": OmegaConf.load(CONFIG_DIR / "data" / f"{data_name}.yaml")}
+
+    # 4. Top-level overrides (strip Hydra-only keys)
+    top = OmegaConf.to_container(top_raw, resolve=False)
+    for key in ("defaults", "hydra"):
+        top.pop(key, None)
+
+    # 5. Merge all layers
+    merged = OmegaConf.merge(base, stage, data_overlay, top)
+
+    # 6. Test-specific overrides
+    test_overrides = {
+        "hardware": {"devices": "0"},
+        "training": {"accumulate_grad_batches": 1},
+        "data": {"root": DATASET_ROOT},
         "tokenizer": {
-            "add_selfies_tokens": True,
-            "selfies_token_path": os.path.join(PROJECT_ROOT, "src", "model", "selfies_dict.txt"),
-        },
-        "data": {
-            "root": DATASET_ROOT,
-            "splits": {
-                "train": "Train_toy100",
-                "val": "Val_toy100",
-                "test": "Test_toy100",
-            },
-            "max_length": 512,
-            "gen_max_len": 256,
-            "truncation": True,
-            "padding": "max_length",
-            "min_len": 8,
-        },
-        "training": {
-            "max_steps": -1,
-            "max_epochs": 3,
-            "batch_size": 4,
-            "accumulate_grad_batches": 1,
-            "weight_decay": 0.1,
-            "gradient_clip_val": 1.0,
-        },
-        "scheduler": {
-            "warmup_steps": 50,
-            "decay_ratio": 0.1,
-            "min_lr_ratio": 0.1,
-        },
-        "lr": {
-            "lora": 2.5e-3,
-            "embed_orig": 2.5e-5,
-            "embed_new": 2.5e-5,
-            "head_orig": 2.5e-5,
-            "head_new": 2.5e-5,
-            "other": 0.0,
-        },
-        "hardware": {
-            "accelerator": "gpu",
-            "devices": "0",
-            "precision": "bf16-mixed",
-            "num_workers": 0,
-            "find_unused_parameters": True,
-        },
-        "generation": {
-            "remasking_strategy": "low_confidence",
-            "sampling_steps": 32,
-            "semi_ar": {
-                "enabled": False,
-                "block_size": 32,
-                "steps_per_block": 4,
-            },
-        },
-        "validation": {
-            "num_sanity_val_steps": 0,
-            "val_check_interval": 1.0,
-            "check_val_every_n_epoch": 1,
-            "limit_val_batches": 1.0,
-            "inference_batch_size": 8,
+            "selfies_dict_path": os.path.join(PROJECT_ROOT, "src", "model", "selfies_dict.txt"),
         },
         "logging": {
             "dir": "/tmp/molda_test_ckpt",
-            "log_every_n_steps": 1,
-            "save_on_n_steps": 500,
-            "save_top_k_checkpoints": -1,
-            "save_every_n_epochs": 1,
-            "val_log_samples_per_gpu": 1,
-            "log_stepwise_denoising": False,
-            "stepwise_max_samples": 8,
-            "log_nan_details": True,
             "nan_log_dir": "/tmp/molda_test_nan",
         },
-        "wandb": {"enabled": False},
-        "qformer": {
-            "num_query_token": 32,
-            "bert_name": "scibert",
-            "bert_hidden_dim": 768,
-            "cross_attention_freq": 2,
-            "num_layers": 5,
-        },
-    })
+    }
+    merged = OmegaConf.merge(merged, test_overrides)
+
+    return merged
+
+
+# ── Config fixture ──
+
+@pytest.fixture(scope="session")
+def cfg():
+    """Load config from yaml files (toy_SELFIES + stage1 + default)."""
+    return load_config("toy_SELFIES")
 
 
 # ── Real tokenizer (downloads tokenizer only, not model weights) ──
 
 @pytest.fixture(scope="session")
-def real_tokenizer():
-    """Load actual LLaDA tokenizer with special tokens added."""
+def real_tokenizer(cfg):
+    """Load actual LLaDA tokenizer with config-specific special tokens."""
     from transformers import AutoTokenizer
     from src.model import added_tokens
 
@@ -160,13 +123,22 @@ def real_tokenizer():
         trust_remote_code=True,
     )
 
+    # Base special tokens (always)
     special_tokens = (
         added_tokens.BOOL + added_tokens.FLOAT + added_tokens.DESCRIPTION
-        + added_tokens.SELFIES + added_tokens.MOL_2D + added_tokens.MOL_3D
+        + added_tokens.MOL_2D + added_tokens.MOL_3D
         + added_tokens.MOL_EMBEDDING + added_tokens.NUMBER
         + added_tokens.INSTRUCTION + added_tokens.REACTION_DIRECTION
         + added_tokens.IUPAC + added_tokens.MOLFORMULA
     )
+
+    # Mol representation tag (config-driven, one of)
+    mol_token_type = cfg.tokenizer.mol_token_type
+    if mol_token_type == "selfies":
+        special_tokens += added_tokens.SELFIES
+    elif mol_token_type == "smiles":
+        special_tokens += added_tokens.SMILES
+
     tokenizer.add_tokens(special_tokens)
     return tokenizer
 
@@ -174,15 +146,15 @@ def real_tokenizer():
 # ── Toy dataset fixtures ──
 
 @pytest.fixture(scope="session")
-def toy_train_dataset():
-    """Load Train_toy100 dataset."""
+def toy_train_dataset(cfg):
+    """Load train dataset from config-specified path."""
     from src.data.dataset import MoleculeDataset
-    return MoleculeDataset(os.path.join(DATASET_ROOT, "Train_toy100"))
+    return MoleculeDataset(os.path.join(cfg.data.root, cfg.data.splits.train))
 
 
 @pytest.fixture(scope="session")
 def toy_train_samples(toy_train_dataset):
-    """Load first 10 samples from Train_toy100."""
+    """Load first 10 samples from train dataset."""
     return [toy_train_dataset[i] for i in range(min(10, len(toy_train_dataset)))]
 
 

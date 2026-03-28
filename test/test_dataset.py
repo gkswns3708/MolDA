@@ -16,9 +16,9 @@ class TestMoleculeDataset:
     def test_train_dataset_length_2100(self, toy_train_dataset):
         assert len(toy_train_dataset) == 2100
 
-    def test_val_dataset_length_1900(self):
+    def test_val_dataset_length_1900(self, cfg):
         from src.data.dataset import MoleculeDataset
-        ds = MoleculeDataset(os.path.join(DATASET_ROOT, "Val_toy100"))
+        ds = MoleculeDataset(os.path.join(cfg.data.root, cfg.data.splits.val))
         assert len(ds) == 1900
 
     def test_sample_has_required_fields(self, toy_train_samples):
