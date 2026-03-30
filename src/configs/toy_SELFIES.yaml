@@ -21,6 +21,8 @@ wandb:
   project: MolDA
   entity: null
   run_name: null    # null → auto-generated
+  tags: []
+  group: null
 
 # Hydra: cwd를 바꾸지 않음 → 상대 경로가 project root 기준으로 동작
 hydra:

@@ -80,14 +80,21 @@ def main(cfg: DictConfig):
     # Logger: CSVLogger (항상) + WandB (선택)
     csv_logger = CSVLogger(save_dir=".", name="lightning_logs")
     loggers = [csv_logger]
+    wandb_logger = None
     if cfg.wandb.get("enabled", False):
         from pytorch_lightning.loggers import WandbLogger
-        loggers.append(WandbLogger(
+        wandb_logger = WandbLogger(
             project=cfg.wandb.project,
             entity=cfg.wandb.get("entity"),
             name=cfg.wandb.get("run_name"),
             save_dir=log_dir,
-        ))
+            id=cfg.wandb.get("id"),
+            resume="allow" if cfg.wandb.get("id") else None,
+            tags=cfg.wandb.get("tags", []),
+            group=cfg.wandb.get("group"),
+            log_model=cfg.wandb.get("log_model", False),
+        )
+        loggers.append(wandb_logger)
 
     # Trainer
     trainer = pl.Trainer(
@@ -109,11 +116,25 @@ def main(cfg: DictConfig):
         enable_progress_bar=True,
     )
 
+    # WandB: gradient/param histogram 로깅 (opt-in)
+    if wandb_logger is not None and cfg.wandb.get("watch_model", False):
+        wandb_logger.watch(
+            model,
+            log="all",
+            log_freq=cfg.wandb.get("log_freq", 10),
+            log_graph=False,
+        )
+
     # Run
     if cfg.mode == "ft":
         trainer.fit(model, dm, ckpt_path=cfg.ckpt_path)
     elif cfg.mode == "test":
         trainer.test(model, dm, ckpt_path=cfg.ckpt_path)
+
+    # WandB: run 정상 종료
+    if wandb_logger is not None:
+        import wandb
+        wandb.finish()
 
 
 if __name__ == "__main__":

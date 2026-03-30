@@ -371,8 +371,15 @@ class MolDATrainer(pl.LightningModule):
             for k, v in metrics.items():
                 self.log(f"val/{task}/{strategy}/{k}", v, sync_dist=True)
 
-        # Sample logging: 수집된 sample 일괄 write
+        # Sample logging: WandB Table (rank 0만, flush 전에 호출) + TXT 파일
         if self._sample_logger:
+            if self.global_rank == 0:
+                wandb_lg = self._get_wandb_logger()
+                if wandb_lg is not None:
+                    self._sample_logger.flush_to_wandb(
+                        wandb_lg.experiment,
+                        self.current_epoch, self.global_step,
+                    )
             self._sample_logger.flush(
                 self.current_epoch, self.global_step,
                 rank=self.global_rank,
@@ -381,6 +388,17 @@ class MolDATrainer(pl.LightningModule):
         # Clear buffers
         self._val_cls_outputs = []
         self._val_gen_outputs = []
+
+    # ─────────────────────────────────────────
+    # WandB helpers
+    # ─────────────────────────────────────────
+
+    def _get_wandb_logger(self):
+        """WandbLogger가 있으면 반환, 없으면 None."""
+        for lg in self.loggers:
+            if type(lg).__name__ == "WandbLogger":
+                return lg
+        return None
 
     # ─────────────────────────────────────────
     # Checkpoint: save trainable params only
