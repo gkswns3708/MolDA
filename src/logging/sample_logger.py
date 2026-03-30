@@ -133,3 +133,37 @@ class ValidationSampleLogger:
         # 버퍼 초기화
         self._cls_samples = []
         self._gen_samples = []
+
+    def flush_to_wandb(self, experiment, epoch: int, global_step: int):
+        """수집된 sample을 WandB Table로 로깅. flush() 전에 호출해야 함.
+
+        Args:
+            experiment: wandb.Run 객체 (wandb_logger.experiment)
+            epoch: 현재 epoch
+            global_step: 현재 global step
+        """
+        import wandb
+
+        if self._cls_samples:
+            cls_table = wandb.Table(
+                columns=["epoch", "step", "task", "target", "prediction",
+                         "prob_true", "correct"]
+            )
+            for s in self._cls_samples:
+                cls_table.add_data(
+                    epoch, global_step, s["task"], s["target"],
+                    s["prediction"], s["prob_true"], s["correct"],
+                )
+            experiment.log({"val/classification_samples": cls_table})
+
+        if self._gen_samples:
+            gen_table = wandb.Table(
+                columns=["epoch", "step", "task", "strategy", "target",
+                         "prediction", "exact_match"]
+            )
+            for s in self._gen_samples:
+                gen_table.add_data(
+                    epoch, global_step, s["task"], s.get("strategy", ""),
+                    s["target"], s["prediction"], s["exact_match"],
+                )
+            experiment.log({"val/generation_samples": gen_table})
