@@ -25,62 +25,16 @@ if PROJECT_ROOT not in sys.path:
 
 os.environ.setdefault("HF_HOME", os.path.join(PROJECT_ROOT, "hf-cache"))
 
-DATASET_ROOT = os.path.join(PROJECT_ROOT, "dataset")
 ORIGINAL_VOCAB_SIZE = 126349
 MASK_TOKEN_ID = 126336
 
 # ─────────────────────────────────────────
-# Config (conftest.py와 동일)
+# Config (conftest.py의 load_config 재사용)
 # ─────────────────────────────────────────
-cfg = OmegaConf.create({
-    "seed": 42, "mode": "ft", "stage": 1, "debug": False, "ckpt_path": None,
-    "model": {
-        "llm": "GSAI-ML/LLaDA-8B-Instruct", "tune_llm": "lora", "tune_gnn": False,
-        "mol_representation": "string_only", "original_vocab_size": ORIGINAL_VOCAB_SIZE,
-    },
-    "lora": {"r": 64, "alpha": 32, "dropout": 0.05, "config_path": None},
-    "tokenizer": {
-        "add_selfies_tokens": True,
-        "selfies_token_path": os.path.join(PROJECT_ROOT, "src", "model", "selfies_dict.txt"),
-    },
-    "data": {
-        "root": DATASET_ROOT,
-        "splits": {"train": "Train_toy100", "val": "Val_toy100", "test": "Test_toy100"},
-        "max_length": 512, "gen_max_len": 256, "truncation": True, "padding": "max_length", "min_len": 8,
-    },
-    "training": {
-        "max_steps": -1, "max_epochs": 3, "batch_size": 2,
-        "accumulate_grad_batches": 1, "weight_decay": 0.1, "gradient_clip_val": 1.0,
-    },
-    "scheduler": {"warmup_steps": 50, "decay_ratio": 0.1, "min_lr_ratio": 0.1},
-    "lr": {
-        "lora": 2.5e-3, "embed_orig": 2.5e-5, "embed_new": 2.5e-5,
-        "head_orig": 2.5e-5, "head_new": 2.5e-5, "other": 0.0,
-    },
-    "hardware": {
-        "accelerator": "gpu", "devices": "0", "precision": "bf16-mixed",
-        "num_workers": 0, "find_unused_parameters": True,
-    },
-    "generation": {
-        "remasking_strategy": "low_confidence", "sampling_steps": 32,
-        "semi_ar": {"enabled": False, "block_size": 32, "steps_per_block": 4},
-    },
-    "validation": {
-        "num_sanity_val_steps": 0, "val_check_interval": 1.0,
-        "check_val_every_n_epoch": 1, "limit_val_batches": 1.0, "inference_batch_size": 8,
-    },
-    "logging": {
-        "dir": "/tmp/molda_test_ckpt", "log_every_n_steps": 1, "save_on_n_steps": 500,
-        "save_top_k_checkpoints": -1, "save_every_n_epochs": 1, "val_log_samples_per_gpu": 1,
-        "log_stepwise_denoising": False, "stepwise_max_samples": 8,
-        "log_nan_details": True, "nan_log_dir": "/tmp/molda_test_nan",
-    },
-    "wandb": {"enabled": False},
-    "qformer": {
-        "num_query_token": 32, "bert_name": "scibert", "bert_hidden_dim": 768,
-        "cross_attention_freq": 2, "num_layers": 5,
-    },
-})
+sys.path.insert(0, os.path.join(PROJECT_ROOT, "test"))
+from conftest import load_config
+
+cfg = load_config("toy_SELFIES")
 
 
 def fmt_tensor_stats(t, name=""):
@@ -690,6 +644,193 @@ def main():
     L(f"| Total GPU | {mem_total:.2f} |")
     L(f"| Free | {mem_total - mem_reserved:.2f} |")
     L("")
+
+    # ─────────────────────────────────────────
+    # 10. Step-wise Denoising Logging
+    # ─────────────────────────────────────────
+    L("## 10. Step-wise Denoising Logging — 4가지 전략 조합")
+    L("")
+    L("> `generate_with_logging()`을 remasking × sampling 4가지 조합으로 실행하여 denoising 과정을 시각화.")
+    L("> 학습 1 step 직후의 모델 — 무작위에 가까운 생성이 정상.")
+    L("> **Prompt A**: 분자 Task (batch에서 추출). **Prompt B**: 일반 질문 (base LLaDA 능력 확인).")
+    L(">")
+    L("> **확률 표기**: `N.N%` = 이번 step에서 새로 확정된 토큰의 softmax 확률, "
+       "`prev` = 이전 step에서 이미 확정 (LLaDA는 한 번 unmask된 토큰을 re-mask하지 않음).")
+    L("")
+
+    # Prep: eval mode + memory cleanup
+    model.eval()
+    model.zero_grad(set_to_none=True)
+    torch.cuda.empty_cache()
+
+    from src.generation.generate import generate_with_logging
+
+    # ── Prompt A: 분자 Task (batch sample 0) ──
+    s10 = 0
+    plen10 = prompt_lengths[s10].item()
+    prompt_ids_mol = input_ids[s10:s10+1, :plen10]        # [1, P]
+    prompt_mask_mol = attention_mask[s10:s10+1, :plen10]   # [1, P]
+
+    answer_len10 = (labels[s10] != -100).sum().item()
+    target_ids10 = input_ids[s10, plen10:plen10 + answer_len10]
+    target_text_mol = tokenizer.decode(target_ids10.tolist(), skip_special_tokens=False)
+    prompt_text_mol = tokenizer.decode(prompt_ids_mol[0].tolist(), skip_special_tokens=False)
+
+    # ── Prompt B: 일반 질문 (base LLaDA-8B-Instruct 능력 확인) ──
+    general_prompt = "What is the chemical formula of water? The answer is"
+    prompt_ids_gen = tokenizer.encode(general_prompt, add_special_tokens=False, return_tensors="pt").cuda()
+    prompt_mask_gen = torch.ones_like(prompt_ids_gen)
+
+    # Build prompt list
+    prompts = [
+        {
+            "tag": "A", "desc": "분자 Task (batch sample)",
+            "ids": prompt_ids_mol, "mask": prompt_mask_mol,
+            "target": target_text_mol,
+            "prompt_text": prompt_text_mol[:100] + ("..." if len(prompt_text_mol) > 100 else ""),
+        },
+        {
+            "tag": "B", "desc": "일반 질문 (base LLaDA 능력 확인)",
+            "ids": prompt_ids_gen, "mask": prompt_mask_gen,
+            "target": "(expected: H2O)",
+            "prompt_text": general_prompt,
+        },
+    ]
+
+    # Diagnostic parameters (small for fast execution)
+    DIAG_GEN_LEN = 48
+    DIAG_STEPS = 8
+    DIAG_BLOCK_LEN = 16   # semi_ar: 48 / 16 = 3 blocks
+    DIAG_TOK_WIDTH = 18
+    DIAG_TOK_PER_LINE = 6
+
+    strategies = [
+        {"remasking": "low_confidence", "semi_ar": False, "label": "low_confidence + standard"},
+        {"remasking": "low_confidence", "semi_ar": True,  "label": "low_confidence + semi_ar"},
+        {"remasking": "random",         "semi_ar": False, "label": "random + standard"},
+        {"remasking": "random",         "semi_ar": True,  "label": "random + semi_ar"},
+    ]
+
+    L(f"- gen_length={DIAG_GEN_LEN}, steps={DIAG_STEPS}, block_length={DIAG_BLOCK_LEN} (semi_ar용)")
+    L("")
+
+    subsection = 0
+    for pi, prompt_info in enumerate(prompts):
+        L(f"---")
+        L("")
+        L(f"### Prompt {prompt_info['tag']}: {prompt_info['desc']}")
+        L("")
+        L(f"- Prompt: `{prompt_info['prompt_text']}`")
+        L(f"- Prompt length: {prompt_info['ids'].shape[1]} tokens")
+        L(f"- Target: `{prompt_info['target'][:80]}{'...' if len(prompt_info['target']) > 80 else ''}`")
+        L("")
+
+        cur_prompt_ids = prompt_info["ids"]
+        cur_prompt_mask = prompt_info["mask"]
+        cur_prompt_len = cur_prompt_ids.shape[1]
+
+        for si, strat in enumerate(strategies):
+            subsection += 1
+            L(f"#### 10.{subsection}. [{prompt_info['tag']}] {strat['label']}")
+            L("")
+
+            # Config table
+            L(f"| Config | Value |")
+            L(f"|--------|-------|")
+            L(f"| Remasking | {strat['remasking']} |")
+            L(f"| Sampling | {'semi_ar' if strat['semi_ar'] else 'standard'} |")
+            L(f"| Steps (requested) | {DIAG_STEPS} |")
+            L(f"| gen_length | {DIAG_GEN_LEN} |")
+            if strat["semi_ar"]:
+                L(f"| block_length | {DIAG_BLOCK_LEN} |")
+            L("")
+
+            # Generate
+            output_ids, snapshots, conf_snapshots = generate_with_logging(
+                model.llada.model,
+                cur_prompt_ids,
+                attention_mask=cur_prompt_mask,
+                gen_length=DIAG_GEN_LEN,
+                steps=DIAG_STEPS,
+                remasking=strat["remasking"],
+                semi_ar=strat["semi_ar"],
+                block_length=DIAG_BLOCK_LEN,
+                mask_id=MASK_TOKEN_ID,
+                collect_confidence=True,
+            )
+
+            total_steps = len(snapshots)
+            actual_gen_len = snapshots[0].shape[-1]
+
+            L(f"- Actual steps: **{total_steps}** (requested: {DIAG_STEPS})")
+            L(f"- Actual gen_length: **{actual_gen_len}**")
+            L("")
+
+            # Step progression table
+            L(f"| Step | Unmasked | Total | Unmasked % |")
+            L(f"|------|----------|-------|------------|")
+            for step_idx, snap in enumerate(snapshots):
+                tokens = snap[0]  # [gen_length], first (only) sample
+                mask_count = (tokens == MASK_TOKEN_ID).sum().item()
+                unmasked = actual_gen_len - mask_count
+                pct = unmasked / actual_gen_len * 100 if actual_gen_len > 0 else 0
+                L(f"| {step_idx+1}/{total_steps} | {unmasked} | {actual_gen_len} | {pct:.1f}% |")
+            L("")
+
+            # Key step visualization (first, middle, last) — with confidence %
+            key_indices = sorted(set([0, total_steps // 2, total_steps - 1]))
+            for ki in key_indices:
+                tokens = snapshots[ki][0]   # [gen_length]
+                confs = conf_snapshots[ki][0]  # [gen_length]
+                mask_count = (tokens == MASK_TOKEN_ID).sum().item()
+                unmasked = actual_gen_len - mask_count
+                pct = unmasked / actual_gen_len * 100
+
+                L(f"**Step {ki+1}/{total_steps}** — Unmasked: {unmasked}/{actual_gen_len} ({pct:.1f}%)")
+                L("")
+                L("```")
+                L(f"  {'Pos':<11} {'Token':<{DIAG_TOK_WIDTH}} {'Prob':>6}   {'Token':<{DIAG_TOK_WIDTH}} {'Prob':>6}   {'Token':<{DIAG_TOK_WIDTH}} {'Prob':>6}")
+                L(f"  {'─' * (11 + (DIAG_TOK_WIDTH + 9) * 3)}")
+
+                # 토큰 + 확률 문자열 준비
+                token_strs = []
+                conf_strs = []
+                for t_idx, t_id in enumerate(tokens.tolist()):
+                    c = confs[t_idx].item()
+                    if t_id == MASK_TOKEN_ID:
+                        token_strs.append("[MASK]")
+                        conf_strs.append("")
+                    else:
+                        dec = tokenizer.decode([t_id]).replace('\n', '\\n').replace('\t', '\\t')
+                        if len(dec) > DIAG_TOK_WIDTH - 2:
+                            dec = dec[:DIAG_TOK_WIDTH - 3] + "…"
+                        token_strs.append(dec)
+                        if c < 1.0:
+                            conf_strs.append(f"{c*100:5.1f}%")
+                        else:
+                            conf_strs.append(" prev")  # 이전 step에서 이미 확정
+
+                # 3 tokens per line (토큰 + 확률이므로 좀 더 넓게)
+                cols = 3
+                for row_start in range(0, len(token_strs), cols):
+                    row_end = min(row_start + cols, len(token_strs))
+                    parts = []
+                    for ci in range(row_start, row_end):
+                        parts.append(f"{token_strs[ci]:<{DIAG_TOK_WIDTH}} {conf_strs[ci]:>6}")
+                    idx_label = f"  [{row_start:3d}-{row_end-1:3d}]"
+                    L(f"{idx_label} {'   '.join(parts)}")
+
+                L("```")
+                L("")
+
+            # Final generated text vs target
+            gen_part = output_ids[0, cur_prompt_len:]
+            gen_text = tokenizer.decode(gen_part.tolist(), skip_special_tokens=False)
+            L(f"**Generated**: `{gen_text[:120]}{'...' if len(gen_text) > 120 else ''}`")
+            L(f"**Target**: `{prompt_info['target'][:120]}{'...' if len(prompt_info['target']) > 120 else ''}`")
+            L("")
+
+    model.train()  # restore
 
     # ─────────────────────────────────────────
     # Write

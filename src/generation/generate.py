@@ -105,7 +105,8 @@ def generate_with_logging(
     temperature: float = 0.0,
     cfg_scale: float = 0.0,
     mask_id: int = 126336,
-) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+    collect_confidence: bool = False,
+) -> Tuple[torch.Tensor, List[torch.Tensor], List[torch.Tensor]]:
     """공식 LLaDA generate 로직 재구현 + step별 snapshot 수집.
 
     루프 내에서는 tensor.clone().cpu() 만 수행 (file I/O, decode 없음).
@@ -113,10 +114,15 @@ def generate_with_logging(
 
     Args:
         (generate() 와 동일)
+        collect_confidence: True일 때만 각 step의 predicted token softmax prob를 수집.
+            production(trainer.py)에서는 False(기본값) — 추가 softmax 연산 없음.
 
     Returns:
         output_ids: [B, P + gen_length] full sequence including prompt
         snapshots: list[Tensor] — 각 step의 gen_tokens [B, gen_length] (CPU)
+        confidence_snapshots: list[Tensor] — 각 step의 predicted token prob [B, gen_length] (CPU).
+            collect_confidence=False이면 빈 리스트.
+            확정(non-mask) 위치는 1.0, mask 위치는 0.0.
     """
     # Determine effective block_length (generate()와 동일 로직)
     if semi_ar:
@@ -153,6 +159,7 @@ def generate_with_logging(
     steps_per_block = steps // num_blocks
 
     snapshots: List[torch.Tensor] = []
+    confidence_snapshots: List[torch.Tensor] = []
 
     for num_block in range(num_blocks):
         block_start = prompt_len + num_block * effective_block_length
@@ -204,4 +211,26 @@ def generate_with_logging(
             # Snapshot: tensor clone만 (병목 없음, ~μs)
             snapshots.append(x[:, prompt_len:].clone().cpu())
 
-    return x, snapshots
+            # Confidence snapshot (opt-in: collect_confidence=True일 때만)
+            if collect_confidence:
+                # 현재 x의 gen 영역에 대해: 확정된 토큰의 softmax prob 수집
+                # remasking=="low_confidence"면 이미 p가 있으나, "random"이면 별도 계산 필요
+                if remasking == "low_confidence":
+                    # p는 이미 위에서 계산됨 — x0_p가 predicted token의 softmax prob
+                    actual_prob = x0_p
+                else:
+                    # random remasking: softmax를 별도 계산 (collect_confidence=True일 때만)
+                    p = F.softmax(logits, dim=-1)
+                    actual_prob = torch.squeeze(
+                        torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1,
+                    )
+                # 확정 위치(non-mask)는 1.0, 아직 mask인 위치는 0.0
+                conf = torch.zeros_like(x, dtype=torch.float32)
+                settled = (x != mask_id)
+                # prompt 영역은 관심 없음 — gen 영역만
+                conf[settled] = 1.0
+                # 이번 step에서 새로 확정된 토큰에는 실제 확률 기록
+                conf[transfer_index] = actual_prob[transfer_index].float()
+                confidence_snapshots.append(conf[:, prompt_len:].clone().cpu())
+
+    return x, snapshots, confidence_snapshots

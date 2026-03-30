@@ -2,7 +2,7 @@
 LLaDA model wrapper: tokenizer + model loading + LoRA + vocab expansion.
 
 Responsibilities:
-1. Load tokenizer + add special tokens (added_tokens.py + selfies_dict.txt)
+1. Load tokenizer + add special tokens (added_tokens.py + optional mol dict)
 2. Load LLaDA model (AutoModelForCausalLM) with weight_tying=True override
 3. Resize embeddings with mean + std*randn initialization for new tokens
 4. Apply LoRA via PEFT
@@ -75,12 +75,14 @@ class LLaDAWrapper(nn.Module):
         return self._model
 
     def _add_special_tokens(self) -> int:
-        """Add all special tokens + SELFIES dict to tokenizer."""
+        """Add special tokens + mol repr tag + optional mol dict to tokenizer."""
+        mol_token_type = self.cfg.tokenizer.mol_token_type  # "selfies" | "smiles"
+
+        # Base special tokens (always added)
         special_tokens = (
             added_tokens.BOOL
             + added_tokens.FLOAT
             + added_tokens.DESCRIPTION
-            + added_tokens.SELFIES
             + added_tokens.MOL_2D
             + added_tokens.MOL_3D
             + added_tokens.MOL_EMBEDDING
@@ -91,16 +93,30 @@ class LLaDAWrapper(nn.Module):
             + added_tokens.MOLFORMULA
         )
 
-        # SELFIES dictionary tokens
-        if self.cfg.tokenizer.add_selfies_tokens:
-            selfies_path = Path(self.cfg.tokenizer.selfies_token_path)
-            if selfies_path.exists():
-                with open(selfies_path) as f:
-                    selfies_tokens = [line.strip() for line in f if line.strip()]
-                special_tokens.extend(selfies_tokens)
-                logger.info(f"Loaded {len(selfies_tokens)} SELFIES tokens from {selfies_path}")
-            else:
-                logger.warning(f"SELFIES token file not found: {selfies_path}")
+        # Mol representation tag (always, one of)
+        if mol_token_type == "selfies":
+            special_tokens += added_tokens.SELFIES
+        elif mol_token_type == "smiles":
+            special_tokens += added_tokens.SMILES
+        else:
+            raise ValueError(f"Unknown mol_token_type: {mol_token_type}")
+
+        # Mol dictionary (optional)
+        if self.cfg.tokenizer.add_mol_dict:
+            if mol_token_type == "selfies":
+                selfies_path = Path(self.cfg.tokenizer.selfies_dict_path)
+                if selfies_path.exists():
+                    with open(selfies_path) as f:
+                        selfies_tokens = [line.strip() for line in f if line.strip()]
+                    special_tokens.extend(selfies_tokens)
+                    logger.info(f"Loaded {len(selfies_tokens)} SELFIES tokens from {selfies_path}")
+                else:
+                    logger.warning(f"SELFIES token file not found: {selfies_path}")
+            elif mol_token_type == "smiles":
+                raise NotImplementedError(
+                    "SMILES dictionary is not available yet. "
+                    "Set tokenizer.add_mol_dict=false to use SMILES without dictionary."
+                )
 
         n_added = self._tokenizer.add_tokens(special_tokens)
 

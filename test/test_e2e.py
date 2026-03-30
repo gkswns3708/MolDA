@@ -283,7 +283,7 @@ class TestGeneration:
         gen_length = cfg.data.gen_max_len  # 256
         steps = 4
 
-        output, snapshots = generate_with_logging(
+        output, snapshots, _ = generate_with_logging(
             molda_model.llada.model,
             prompt_ids,
             attention_mask=prompt_mask,

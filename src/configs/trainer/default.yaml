@@ -47,8 +47,10 @@ qformer:
 # Tokenizer
 # ─────────────────────────────────────────────
 tokenizer:
-  add_selfies_tokens: true
-  selfies_token_path: src/model/selfies_dict.txt
+  mol_token_type: selfies          # selfies | smiles
+  add_mol_dict: true               # molecular dictionary 추가 여부
+  selfies_dict_path: src/model/selfies_dict.txt
+  smiles_dict_path: null           # 미구현 (placeholder)
 
 # ─────────────────────────────────────────────
 # Training

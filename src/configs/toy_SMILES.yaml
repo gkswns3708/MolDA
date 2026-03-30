@@ -1,0 +1,39 @@
+# Top-level config: toy dataset + Stage 1 (SMILES)
+defaults:
+  - trainer: stage1
+  - data: SMILES_toy100
+  - _self_
+
+# Runtime
+seed: 42
+mode: ft            # ft | test
+ckpt_path: null     # resume checkpoint path
+debug: false
+
+# SMILES 표현 사용 (default의 selfies를 override)
+tokenizer:
+  mol_token_type: smiles
+  add_mol_dict: false
+
+# WandB (optional)
+wandb:
+  enabled: false
+  project: MolDA
+  entity: null
+  run_name: null    # null → auto-generated
+  tags: []
+  group: null
+
+# Hydra: cwd를 바꾸지 않음 → 상대 경로가 project root 기준으로 동작
+hydra:
+  run:
+    dir: .                  # cwd 고정 (상대 경로 유지)
+  sweep:
+    dir: .
+  job:
+    chdir: false            # cwd 변경 안 함
+  output_subdir: logs/.hydra   # hydra config 저장 위치
+  job_logging:
+    handlers:
+      file:
+        filename: logs/train.log

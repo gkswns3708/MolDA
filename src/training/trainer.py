@@ -11,6 +11,7 @@ Handles:
 
 import logging
 from collections import defaultdict
+from itertools import product
 
 import torch
 import pytorch_lightning as pl
@@ -25,6 +26,7 @@ from src.training.metrics import (
 )
 from src.logging.sample_logger import ValidationSampleLogger
 from src.logging.stepwise_logger import StepwiseLogger
+from src.logging.grad_logger import compute_grad_norms
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +58,10 @@ class MolDATrainer(pl.LightningModule):
         # Normalize remasking_strategy to list
         rs = cfg.generation.remasking_strategy
         self._remasking_strategies = [rs] if isinstance(rs, str) else list(rs)
+
+        # Normalize val_strategies (sampling strategies) to list
+        vs = cfg.generation.get("val_strategies", ["random"])
+        self._val_strategies = [vs] if isinstance(vs, str) else list(vs)
 
         # Validation output buffers (reset each epoch)
         self._val_cls_outputs = []   # (probs, label_texts, tasks)
@@ -190,6 +196,14 @@ class MolDATrainer(pl.LightningModule):
 
         return loss
 
+    def on_before_optimizer_step(self, optimizer):
+        """Log per-group gradient norms."""
+        interval = self.cfg.logging.get("weight_norm_interval", 10)
+        if self.global_step % interval != 0:
+            return
+        for name, norm in compute_grad_norms(optimizer).items():
+            self.log(f"train/grad_norm/{name}", norm, sync_dist=False)
+
     # ─────────────────────────────────────────
     # Validation
     # ─────────────────────────────────────────
@@ -251,7 +265,7 @@ class MolDATrainer(pl.LightningModule):
                         tasks[ci], probs[i].cpu(), target_texts[ci],
                     )
 
-        # --- Generation: diffusion sampling (각 remasking strategy별 반복) ---
+        # --- Generation: diffusion sampling (remasking × sampling 전략 조합) ---
         if gen_idx:
             gen_prompt_ids = prompt_ids[gen_idx]
             gen_prompt_mask = prompt_mask[gen_idx]
@@ -259,17 +273,25 @@ class MolDATrainer(pl.LightningModule):
             gen_labels = [target_texts[i] for i in gen_idx]
             gen_tasks = [tasks[i] for i in gen_idx]
 
-            for strategy in self._remasking_strategies:
+            for remasking, sampling in product(
+                self._remasking_strategies, self._val_strategies
+            ):
+                is_semi_ar = (sampling == "semi_ar")
+                block_length = gen_cfg.semi_ar.block_size if is_semi_ar else None
+                strategy_key = f"{remasking}_{sampling}"
+
                 # Stepwise logging 조건: enabled + max_samples 이내
                 if self._stepwise_logger and self._stepwise_logger.should_log():
                     from src.generation.generate import generate_with_logging
-                    pred_ids, snapshots = generate_with_logging(
+                    pred_ids, snapshots, _ = generate_with_logging(
                         self.model.llada.model,
                         gen_prompt_ids,
                         attention_mask=gen_prompt_mask,
                         gen_length=self.cfg.data.gen_max_len,
                         steps=gen_cfg.sampling_steps,
-                        remasking=strategy,
+                        remasking=remasking,
+                        semi_ar=is_semi_ar,
+                        block_length=block_length or gen_cfg.sampling_steps,
                     )
                     # Deferred write: generation 완료 후 일괄 decode + file write
                     self._stepwise_logger.write_stepwise_log(
@@ -281,8 +303,8 @@ class MolDATrainer(pl.LightningModule):
                         tokenizer=self.tokenizer,
                         config={
                             "steps": gen_cfg.sampling_steps,
-                            "remasking": strategy,
-                            "semi_ar": gen_cfg.semi_ar.get("enabled", False),
+                            "remasking": remasking,
+                            "semi_ar": is_semi_ar,
                         },
                     )
                 else:
@@ -293,7 +315,9 @@ class MolDATrainer(pl.LightningModule):
                         attention_mask=gen_prompt_mask,
                         gen_length=self.cfg.data.gen_max_len,
                         steps=gen_cfg.sampling_steps,
-                        remasking=strategy,
+                        remasking=remasking,
+                        semi_ar=is_semi_ar,
+                        block_length=block_length or gen_cfg.sampling_steps,
                     )
 
                 # Decode predictions (only generated part, after prompt)
@@ -301,14 +325,14 @@ class MolDATrainer(pl.LightningModule):
                 gen_part = pred_ids[:, prompt_len:]
                 pred_texts = self.tokenizer.batch_decode(gen_part, skip_special_tokens=False)
 
-                self._val_gen_outputs.append((pred_texts, gen_labels, gen_tasks, strategy))
+                self._val_gen_outputs.append((pred_texts, gen_labels, gen_tasks, strategy_key))
 
                 # Sample 수집 (GPU당 N개 제한, strategy 포함)
                 if self._sample_logger:
                     for i, gi in enumerate(gen_idx):
                         self._sample_logger.collect_generation(
                             tasks[gi], pred_texts[i], target_texts[gi],
-                            strategy=strategy,
+                            strategy=strategy_key,
                         )
 
     def on_validation_epoch_end(self):
@@ -347,8 +371,15 @@ class MolDATrainer(pl.LightningModule):
             for k, v in metrics.items():
                 self.log(f"val/{task}/{strategy}/{k}", v, sync_dist=True)
 
-        # Sample logging: 수집된 sample 일괄 write
+        # Sample logging: WandB Table (rank 0만, flush 전에 호출) + TXT 파일
         if self._sample_logger:
+            if self.global_rank == 0:
+                wandb_lg = self._get_wandb_logger()
+                if wandb_lg is not None:
+                    self._sample_logger.flush_to_wandb(
+                        wandb_lg.experiment,
+                        self.current_epoch, self.global_step,
+                    )
             self._sample_logger.flush(
                 self.current_epoch, self.global_step,
                 rank=self.global_rank,
@@ -357,6 +388,17 @@ class MolDATrainer(pl.LightningModule):
         # Clear buffers
         self._val_cls_outputs = []
         self._val_gen_outputs = []
+
+    # ─────────────────────────────────────────
+    # WandB helpers
+    # ─────────────────────────────────────────
+
+    def _get_wandb_logger(self):
+        """WandbLogger가 있으면 반환, 없으면 None."""
+        for lg in self.loggers:
+            if type(lg).__name__ == "WandbLogger":
+                return lg
+        return None
 
     # ─────────────────────────────────────────
     # Checkpoint: save trainable params only
