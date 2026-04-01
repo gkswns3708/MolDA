@@ -69,6 +69,27 @@ class TestTrainCollator:
         if prompt_len < answer_end:
             assert torch.equal(labels[prompt_len:answer_end], input_ids[prompt_len:answer_end])
 
+    def test_eos_appended_after_target(self, real_tokenizer):
+        """EOS token must be appended at the end of target (before padding)."""
+        collator = TrainCollator(real_tokenizer, max_length=256)
+        batch = collator(_make_samples(1))
+        ids = batch["input_ids"][0]
+        attn = batch["attention_mask"][0]
+        eos_id = real_tokenizer.eos_token_id
+        real_len = attn.sum().item()
+        # Last real token should be EOS
+        assert ids[real_len - 1].item() == eos_id
+
+    def test_eos_in_labels(self, real_tokenizer):
+        """EOS token should be part of the answer (labels != -100), not masked."""
+        collator = TrainCollator(real_tokenizer, max_length=256)
+        batch = collator(_make_samples(1))
+        labels = batch["labels"][0]
+        attn = batch["attention_mask"][0]
+        real_len = attn.sum().item()
+        # Last real token's label should NOT be -100 (it's trainable EOS)
+        assert labels[real_len - 1].item() != -100
+
     def test_graph_tag_removal(self, real_tokenizer):
         collator = TrainCollator(real_tokenizer, mol_representation="string_only", max_length=256)
         samples = _make_samples(1, with_graph=True)

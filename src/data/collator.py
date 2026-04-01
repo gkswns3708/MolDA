@@ -49,8 +49,8 @@ class TrainCollator:
             prompt_ids = self.tokenizer.encode(prompt_text, add_special_tokens=False)
             target_ids = self.tokenizer.encode(target_text, add_special_tokens=False)
 
-            # Concatenate and truncate
-            full_ids = prompt_ids + target_ids
+            # Concatenate: prompt + target + EOS (SFT convention, ref: SMDM/sft/)
+            full_ids = prompt_ids + target_ids + [self.eos_token_id]
             if len(full_ids) > self.max_length:
                 full_ids = full_ids[:self.max_length]
                 # Adjust prompt_length if truncation cuts into target
@@ -74,7 +74,8 @@ class TrainCollator:
         for ids, labs in zip(input_ids_list, labels_list):
             pad_len = self.max_length - len(ids)
             padded_input_ids.append(ids + [self.eos_token_id] * pad_len)
-            padded_labels.append(labs + [-100] * pad_len)
+            # LLaDA SFT: padding EOS도 answer region에 포함 (GUIDELINES.md line 80)
+            padded_labels.append(labs + [self.eos_token_id] * pad_len)
             padded_attention_mask.append([1] * len(ids) + [0] * pad_len)
 
         return {

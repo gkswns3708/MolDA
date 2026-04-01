@@ -26,6 +26,7 @@ from src.training.metrics import (
 )
 from src.logging.sample_logger import ValidationSampleLogger
 from src.logging.stepwise_logger import StepwiseLogger
+from src.logging.train_prediction_logger import TrainPredictionLogger
 from src.logging.grad_logger import compute_grad_norms
 
 logger = logging.getLogger(__name__)
@@ -67,9 +68,14 @@ class MolDATrainer(pl.LightningModule):
         self._val_cls_outputs = []   # (probs, label_texts, tasks)
         self._val_gen_outputs = []   # (pred_texts, target_texts, tasks, strategy)
 
-        # Sample / stepwise loggers (log_dir 확보 후 setup()에서 초기화)
+        # Sample / stepwise / train prediction loggers (log_dir 확보 후 setup()에서 초기화)
         self._sample_logger = None
         self._stepwise_logger = None
+        self._train_pred_logger = None
+
+        # Metric 구간 평균 버퍼 (CPU-only: Python float list)
+        # flush 시점에 구간 평균을 self.log()로 기록
+        self._metric_buffer: dict[str, dict] = {}
 
     @property
     def tokenizer(self):
@@ -80,15 +86,21 @@ class MolDATrainer(pl.LightningModule):
     # ─────────────────────────────────────────
 
     def configure_optimizers(self):
-        """Param groups: LoRA / embed / head(optional) / other."""
+        """Param groups: LoRA / embed / head(optional) / other.
+
+        embed_new/head_new LR은 gradient scaling으로 구현:
+        - embed/head param group은 orig LR로 등록
+        - on_before_optimizer_step에서 new vocab rows의 gradient에
+          (lr_new / lr_orig) 비율을 곱해 effective LR을 높임
+        - add_mol_dict=false(no_dict)이면 scaling 안 함
+        """
         cfg = self.cfg
         lr = cfg.lr
         orig_vocab_size = cfg.model.original_vocab_size
 
         # Collect params by group
         lora_params = []
-        embed_orig_params = []
-        embed_new_params = []
+        embed_params = []
         head_params = []
         other_params = []
 
@@ -99,10 +111,7 @@ class MolDATrainer(pl.LightningModule):
             if "lora_" in name:
                 lora_params.append(param)
             elif "embed" in name.lower() or "wte" in name.lower():
-                # Split embedding into orig vs new rows
-                # Full embedding is one parameter; we handle it as one group
-                # (per-row LR split is complex; use embed_orig LR for now)
-                embed_orig_params.append(param)
+                embed_params.append(param)
             elif _is_output_head_param(name):
                 head_params.append(param)
             else:
@@ -110,7 +119,7 @@ class MolDATrainer(pl.LightningModule):
 
         param_groups = [
             {"params": lora_params, "lr": lr.lora, "name": "lora"},
-            {"params": embed_orig_params, "lr": lr.embed_orig, "name": "embed"},
+            {"params": embed_params, "lr": lr.embed_orig, "name": "embed"},
         ]
 
         # head group: weight_tying=True면 별도 ff_out이 없어 비어있을 수 있음
@@ -124,6 +133,28 @@ class MolDATrainer(pl.LightningModule):
             param_groups.append(
                 {"params": other_params, "lr": lr.other, "name": "other"}
             )
+
+        # --- Gradient scaling info for new vocab rows ---
+        # add_mol_dict=false (no_dict)이면 new vocab이 없으므로 scaling 불필요
+        use_new_scaling = cfg.tokenizer.get("add_mol_dict", False)
+
+        if use_new_scaling and lr.embed_orig > 0:
+            lr_ratio_embed = lr.embed_new / lr.embed_orig
+        else:
+            lr_ratio_embed = 1.0
+
+        if use_new_scaling and lr.head_orig > 0 and head_params:
+            lr_ratio_head = lr.head_new / lr.head_orig
+        else:
+            lr_ratio_head = 1.0
+
+        self._embed_head_split_info = {
+            "original_vocab_size": orig_vocab_size,
+            "lr_ratio_embed": lr_ratio_embed,
+            "lr_ratio_head": lr_ratio_head,
+            "embed_params": embed_params,
+            "head_params": head_params,
+        }
 
         optimizer = AdamW(
             param_groups,
@@ -160,11 +191,31 @@ class MolDATrainer(pl.LightningModule):
         except Exception:
             n_samples = 2100  # fallback for toy dataset
 
-        steps_per_epoch = n_samples // (
-            cfg.training.batch_size * max(1, len(str(cfg.hardware.devices).split(",")))
-        )
-        steps_per_epoch = max(1, steps_per_epoch // cfg.training.accumulate_grad_batches)
+        num_devices = max(1, len(str(cfg.hardware.devices).split(",")))
+        per_device_steps = n_samples // (cfg.training.batch_size * num_devices)
+        accumulate = cfg.training.global_batch_size // (cfg.training.batch_size * num_devices)
+        steps_per_epoch = max(1, per_device_steps // max(1, accumulate))
         return steps_per_epoch * cfg.training.max_epochs
+
+    # ─────────────────────────────────────────
+    # Training — metric 구간 평균
+    # ─────────────────────────────────────────
+
+    def _accumulate(self, name: str, value, *, sync_dist: bool = True, prog_bar: bool = False):
+        """Metric 값을 버퍼에 누적 (GPU→CPU float 즉시 변환)."""
+        if isinstance(value, torch.Tensor):
+            value = value.detach().item()
+        if name not in self._metric_buffer:
+            self._metric_buffer[name] = {"values": [], "sync_dist": sync_dist, "prog_bar": prog_bar}
+        self._metric_buffer[name]["values"].append(value)
+
+    def _flush_metrics(self):
+        """버퍼의 구간 평균을 self.log()로 기록 후 리셋."""
+        for name, info in self._metric_buffer.items():
+            vals = info["values"]
+            mean_val = sum(vals) / len(vals)
+            self.log(name, mean_val, prog_bar=info["prog_bar"], sync_dist=info["sync_dist"])
+        self._metric_buffer.clear()
 
     # ─────────────────────────────────────────
     # Training
@@ -172,6 +223,11 @@ class MolDATrainer(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         batch["global_step"] = self.global_step
+
+        # Set detailed prediction logging flag
+        if self._train_pred_logger and self._train_pred_logger.should_log(self.global_step):
+            batch["_log_train_detail"] = True
+
         out = self.model(batch)
         loss = out["loss"]
 
@@ -183,9 +239,55 @@ class MolDATrainer(pl.LightningModule):
         # Manual LR scheduler step
         self._scheduler.step(self.global_step)
 
-        # Logging
-        self.log("train/loss", loss, prog_bar=True, sync_dist=True)
-        self.log("train/answer_length_mean", out["answer_length_mean"], sync_dist=True)
+        # Metric 누적 (구간 평균용, CPU-only)
+        self._accumulate("train/loss", loss, sync_dist=True, prog_bar=True)
+        self._accumulate("train/loss_no_eos", out["per_sample_loss_no_eos"].mean(), sync_dist=True)
+        self._accumulate("train/answer_length_mean", out["answer_length_mean"], sync_dist=True)
+
+        # Per-task loss 누적 (sync_dist=False: tasks may differ across ranks)
+        tasks = batch.get("tasks", [])
+        if tasks:
+            per_sample_loss = out["per_sample_loss"]
+            per_sample_loss_no_eos = out["per_sample_loss_no_eos"]
+            seen = set()
+            for task in tasks:
+                if task in seen:
+                    continue
+                seen.add(task)
+                mask = torch.tensor(
+                    [t == task for t in tasks], device=loss.device, dtype=torch.bool
+                )
+                self._accumulate(f"train/{task}/loss", per_sample_loss[mask].mean(), sync_dist=False)
+                self._accumulate(f"train/{task}/loss_no_eos", per_sample_loss_no_eos[mask].mean(), sync_dist=False)
+
+        # Prediction quality metrics 누적
+        if "mask_accuracy" in out:
+            self._accumulate("train/mask_accuracy", out["mask_accuracy"], sync_dist=True)
+            self._accumulate("train/mask_accuracy_no_eos", out["mask_accuracy_no_eos"], sync_dist=True)
+            self._accumulate("train/target_prob_mean", out["target_prob_mean"], sync_dist=True)
+
+        # Detailed prediction sample log (periodic)
+        if "_train_sample_detail" in out and self._train_pred_logger:
+            detail = out["_train_sample_detail"]
+            task = batch.get("tasks", ["unknown"])[0]
+            self._train_pred_logger.write_sample_log(
+                global_step=self.global_step,
+                epoch=self.current_epoch,
+                task=task,
+                p_mask=detail["p_mask"],
+                mask_positions=detail["mask_positions"],
+                target_tokens=detail["target_tokens"],
+                pred_tokens=detail["pred_tokens"],
+                target_probs=detail["target_probs"],
+                pred_probs=detail["pred_probs"],
+                tokenizer=self.tokenizer,
+                # Full-sequence data for text logging
+                input_ids=detail.get("input_ids"),
+                labels=detail.get("labels"),
+                all_answer_pred_ids=detail.get("all_answer_pred_ids"),
+                all_answer_gt_ids=detail.get("all_answer_gt_ids"),
+                attention_mask=detail.get("attention_mask"),
+            )
 
         # LR logging
         opt = self.optimizers()
@@ -194,15 +296,61 @@ class MolDATrainer(pl.LightningModule):
                 if "name" in group:
                     self.log(f"lr/{group['name']}", group["lr"], sync_dist=False)
 
+            # Log effective LR for new vocab rows (embed_new, head_new)
+            info = getattr(self, "_embed_head_split_info", None)
+            if info is not None:
+                for group in opt.param_groups:
+                    name = group.get("name", "")
+                    if name == "embed":
+                        self.log(
+                            "lr/embed_new",
+                            group["lr"] * info["lr_ratio_embed"],
+                            sync_dist=False,
+                        )
+                    elif name == "head" and info["lr_ratio_head"] != 1.0:
+                        self.log(
+                            "lr/head_new",
+                            group["lr"] * info["lr_ratio_head"],
+                            sync_dist=False,
+                        )
+
+        # 구간 평균 flush (log_every_n_steps 간격)
+        log_interval = getattr(self.trainer, "log_every_n_steps", 1)
+        if (self.global_step + 1) % log_interval == 0:
+            self._flush_metrics()
+
         return loss
 
     def on_before_optimizer_step(self, optimizer):
-        """Log per-group gradient norms."""
+        """Apply gradient scaling for new vocab rows, then log grad norms."""
+        # --- Gradient scaling: new vocab rows에 lr_ratio 곱하기 ---
+        info = getattr(self, "_embed_head_split_info", None)
+        if info is not None:
+            orig_size = info["original_vocab_size"]
+            ratio_embed = info["lr_ratio_embed"]
+            ratio_head = info["lr_ratio_head"]
+
+            if ratio_embed != 1.0:
+                for param in info["embed_params"]:
+                    if param.grad is not None and param.shape[0] > orig_size:
+                        param.grad[orig_size:] *= ratio_embed
+
+            if ratio_head != 1.0:
+                for param in info["head_params"]:
+                    if param.grad is not None and param.shape[0] > orig_size:
+                        param.grad[orig_size:] *= ratio_head
+
+        # --- Gradient norm 누적 (구간 평균) ---
         interval = self.cfg.logging.get("weight_norm_interval", 10)
         if self.global_step % interval != 0:
             return
         for name, norm in compute_grad_norms(optimizer).items():
-            self.log(f"train/grad_norm/{name}", norm, sync_dist=False)
+            self._accumulate(f"train/grad_norm/{name}", norm, sync_dist=False)
+
+    def on_train_end(self):
+        """학습 종료 시 버퍼에 남은 metric flush."""
+        if self._metric_buffer:
+            self._flush_metrics()
 
     # ─────────────────────────────────────────
     # Validation
@@ -224,6 +372,12 @@ class MolDATrainer(pl.LightningModule):
             log_dir=log_dir,
             max_samples=self.cfg.logging.get("stepwise_max_samples", 8),
             enabled=self.cfg.logging.get("log_stepwise_denoising", False),
+        )
+        self._train_pred_logger = TrainPredictionLogger(
+            log_dir=log_dir,
+            log_interval=self.cfg.logging.get("train_prediction_log_interval", 100),
+            max_positions=self.cfg.logging.get("train_prediction_max_positions", 50),
+            enabled=self.cfg.logging.get("log_train_predictions", True),
         )
         logger.info(f"Loggers initialized: log_dir={log_dir}")
 

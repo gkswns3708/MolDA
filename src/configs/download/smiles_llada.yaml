@@ -1,0 +1,29 @@
+raw_data_root: /opt/11-MolDA/New_MolDA/dataset/Raw
+data_tag: SMILES_raw_v1
+mol_representation: smiles
+llm_model: "GSAI-ML/LLaDA-8B-Instruct"
+
+target_benchmarks:
+  - bace
+  - chebi-20-mol2text
+  - chebi-20-text2mol
+  - forward_reaction_prediction
+  - qm9_homo
+  - qm9_homo_lumo_gap
+  - qm9_lumo
+  - reagent_prediction
+  - retrosynthesis
+  - smol-forward_synthesis
+  - smol-molecule_captioning
+  - smol-molecule_generation
+  - smol-property_prediction-bbbp
+  - smol-property_prediction-clintox
+  - smol-property_prediction-esol
+  - smol-property_prediction-hiv
+  - smol-property_prediction-lipo
+  - smol-property_prediction-sider
+  - smol-retrosynthesis
+  # - smol-name_conversion-i2f
+  - smol-name_conversion-i2s
+  # - smol-name_conversion-s2f
+  - smol-name_conversion-s2i

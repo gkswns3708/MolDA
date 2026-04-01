@@ -13,20 +13,18 @@ stage: 1
 # model.tune_gnn: false (default 그대로)
 
 lr:
-  # Base: 2.5e-5 + LoRA 100배 (2.5e-3)
   # Decay: base_lr/10으로 마지막 10% iterations에서 감소
-  lora: 2.5e-3              # LoRA: 2.5e-5 × 100배 (user request)
-                            # Schedule: 0 → 2.5e-3 (50 iter) → 2.5e-4 (decay)
+  lora: 2.5e-4              # LoRA parameters
+                            # Schedule: 0 → 2.5e-4 (50 iter) → 2.5e-5 (decay)
 
-  embed_orig: 2.5e-5        # embedding_tokens (기존 vocab)
+  embed_orig: 2.5e-5        # embedding_tokens (기존 vocab, idx < original_vocab_size)
                             # Schedule: 0 → 2.5e-5 (50 iter) → 2.5e-6 (decay)
 
-  embed_new: 2.5e-5         # embedding_tokens (신규 SELFIES vocab)
-                            # Same as embed_orig
-                            # Schedule: 0 → 2.5e-5 (50 iter) → 2.5e-6 (decay)
+  embed_new: 2.5e-5          # embedding_tokens (신규 vocab, idx >= original_vocab_size)
+                            # add_mol_dict=false일 때는 embed_orig과 동일하게 적용
 
-  head_orig: 2.5e-5         # weight_tying=True: 별도 ff_out 없어 사용 안 됨
-  head_new: 2.5e-5          # weight_tying=True: 별도 ff_out 없어 사용 안 됨
+  head_orig: 2.5e-5         # lm_head (기존 vocab); weight_tying=True면 사용 안 됨
+  head_new: 2.5e-5          # lm_head (신규 vocab); weight_tying=True면 사용 안 됨
 
   other: 0.0                # Q-Former/GNN frozen in Stage 1
 

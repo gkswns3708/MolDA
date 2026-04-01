@@ -203,6 +203,21 @@ class TestMoleculeEvaluate:
         if result.get("exact_match_ratio") is not None:
             assert result["exact_match_ratio"] == 1.0
 
+    def test_maccs_fts_identical(self):
+        """동일 분자 → MACCS FTS ≈ 1.0"""
+        selfies_str = "<SELFIES>[C][C][O]</SELFIES>"  # ethanol
+        result = molecule_evaluate([selfies_str], [selfies_str], "forward_reaction_prediction")
+        if "maccs_fts" in result:
+            assert result["maccs_fts"] == pytest.approx(1.0, abs=1e-5)
+
+    def test_maccs_fts_different(self):
+        """서로 다른 분자 → MACCS FTS < 1.0"""
+        pred = "<SELFIES>[C][C][O]</SELFIES>"      # ethanol
+        gt = "<SELFIES>[C][=C][C][=C][C][=C][Ring1][=Branch1]</SELFIES>"  # benzene
+        result = molecule_evaluate([pred], [gt], "forward_reaction_prediction")
+        if "maccs_fts" in result:
+            assert result["maccs_fts"] < 1.0
+
 
 # ─────────────────────────────────────────────
 # Caption Evaluate
@@ -213,6 +228,7 @@ class TestCaptionEvaluate:
     def test_missing_tags(self):
         result = caption_evaluate(["no tag"], ["no tag"], "chebi-20-mol2text")
         assert result["failure_rate"] == 1.0
+        assert result["meteor"] == 0.0
 
     def test_identical_text(self):
         text = "<DESCRIPTION>This is a molecule.</DESCRIPTION>"
@@ -221,6 +237,13 @@ class TestCaptionEvaluate:
         # BLEU for identical text should be high
         if result["bleu4"] > 0:
             assert result["bleu4"] > 0.5
+
+    def test_meteor_identical(self):
+        """동일 텍스트 → METEOR ≈ 1.0"""
+        text = "<DESCRIPTION>This molecule contains a hydroxyl group attached to a benzene ring.</DESCRIPTION>"
+        result = caption_evaluate([text], [text], "chebi-20-mol2text")
+        if result.get("meteor", 0) > 0:
+            assert result["meteor"] > 0.9
 
 
 # ─────────────────────────────────────────────

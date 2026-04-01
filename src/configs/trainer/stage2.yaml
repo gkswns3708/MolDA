@@ -19,7 +19,7 @@ hardware:
 training:
   max_epochs: 1             # 논문 권장: 1 epoch
   batch_size: 3
-  accumulate_grad_batches: 10
+  global_batch_size: 1024
 
 scheduler:
   warmup_steps: 50          # Stage 1보다 짧게

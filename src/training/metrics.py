@@ -224,15 +224,18 @@ def molecule_evaluate(pred_texts: List[str], label_texts: List[str],
     try:
         import selfies as sf
         from rdkit import Chem
+        from rdkit.Chem import MACCSkeys, DataStructs
     except ImportError:
         logger.warning("selfies/rdkit not installed, returning empty metrics")
-        return {"validity_ratio": 0.0, "exact_match_ratio": 0.0, "failure_rate": 1.0}
+        return {"validity_ratio": 0.0, "exact_match_ratio": 0.0,
+                "maccs_fts": 0.0, "failure_rate": 1.0}
 
     n_total = len(pred_texts)
     n_valid_smiles = 0
     n_exact_match = 0
     n_parsed = 0
     levenshtein_scores = []
+    maccs_scores = []
 
     for pred, gt in zip(pred_texts, label_texts):
         pred_selfies = _parse_tag(pred, "SELFIES")
@@ -251,14 +254,23 @@ def molecule_evaluate(pred_texts: List[str], label_texts: List[str],
 
         # Validity
         pred_mol = Chem.MolFromSmiles(pred_smiles)
+        gt_mol = Chem.MolFromSmiles(gt_smiles)
         if pred_mol is not None:
             n_valid_smiles += 1
             pred_canonical = Chem.MolToSmiles(pred_mol)
-            gt_mol = Chem.MolFromSmiles(gt_smiles)
             if gt_mol is not None:
                 gt_canonical = Chem.MolToSmiles(gt_mol)
                 if pred_canonical == gt_canonical:
                     n_exact_match += 1
+
+        # MACCS Fingerprint Tanimoto Similarity
+        if pred_mol is not None and gt_mol is not None:
+            try:
+                fp_pred = MACCSkeys.GenMACCSKeys(pred_mol)
+                fp_gt = MACCSkeys.GenMACCSKeys(gt_mol)
+                maccs_scores.append(DataStructs.TanimotoSimilarity(fp_pred, fp_gt))
+            except Exception:
+                pass
 
         # Levenshtein on canonical SMILES
         if pred_smiles and gt_smiles:
@@ -270,6 +282,7 @@ def molecule_evaluate(pred_texts: List[str], label_texts: List[str],
         "validity_ratio": n_valid_smiles / n_parsed if n_parsed > 0 else 0.0,
         "exact_match_ratio": n_exact_match / n_parsed if n_parsed > 0 else 0.0,
         "levenshtein_score": float(np.mean(levenshtein_scores)) if levenshtein_scores else 0.0,
+        "maccs_fts": float(np.mean(maccs_scores)) if maccs_scores else 0.0,
         "failure_rate": 1.0 - n_parsed / n_total if n_total > 0 else 1.0,
     }
 
@@ -328,7 +341,7 @@ def caption_evaluate(pred_texts: List[str], label_texts: List[str],
     n_valid = len(preds_parsed)
 
     if n_valid == 0:
-        return {"bleu2": 0.0, "bleu4": 0.0, "rouge1": 0.0, "rougeL": 0.0, "failure_rate": 1.0}
+        return {"bleu2": 0.0, "bleu4": 0.0, "meteor": 0.0, "rouge1": 0.0, "rougeL": 0.0, "failure_rate": 1.0}
 
     # BLEU
     try:
@@ -340,6 +353,15 @@ def caption_evaluate(pred_texts: List[str], label_texts: List[str],
         bleu4 = corpus_bleu(refs, hyps, weights=(0.25, 0.25, 0.25, 0.25), smoothing_function=smooth)
     except ImportError:
         bleu2, bleu4 = 0.0, 0.0
+
+    # METEOR
+    try:
+        from nltk.translate.meteor_score import meteor_score as nltk_meteor
+        meteor_scores = [nltk_meteor([g.split()], p.split())
+                         for p, g in zip(preds_parsed, gts_parsed)]
+        meteor = float(np.mean(meteor_scores))
+    except ImportError:
+        meteor = 0.0
 
     # ROUGE
     try:
@@ -358,6 +380,7 @@ def caption_evaluate(pred_texts: List[str], label_texts: List[str],
     return {
         "bleu2": float(bleu2),
         "bleu4": float(bleu4),
+        "meteor": meteor,
         "rouge1": rouge1,
         "rougeL": rougeL,
         "failure_rate": 1.0 - n_valid / n_total,

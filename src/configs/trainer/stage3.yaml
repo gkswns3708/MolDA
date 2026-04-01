@@ -15,7 +15,7 @@ model:
 training:
   max_epochs: 6
   batch_size: 1
-  accumulate_grad_batches: 10
+  global_batch_size: 1024
 
 lr:
   lora: ???
