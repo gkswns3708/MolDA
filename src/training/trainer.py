@@ -24,10 +24,10 @@ from src.training.metrics import (
     get_task_type, classification_evaluate,
     regression_evaluate, molecule_evaluate, caption_evaluate,
 )
-from src.logging.sample_logger import ValidationSampleLogger
-from src.logging.stepwise_logger import StepwiseLogger
-from src.logging.train_prediction_logger import TrainPredictionLogger
-from src.logging.grad_logger import compute_grad_norms
+from src.loggers.sample_logger import ValidationSampleLogger
+from src.loggers.stepwise_logger import StepwiseLogger
+from src.loggers.train_prediction_logger import TrainPredictionLogger
+from src.loggers.grad_logger import compute_grad_norms
 
 logger = logging.getLogger(__name__)
 

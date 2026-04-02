@@ -409,7 +409,7 @@ class TestLoggingIntegration:
     def test_sample_logger_with_real_probs(self, molda_model, tmp_path):
         """ValidationSampleLogger가 실제 model output으로 정상 동작하는지 확인."""
         molda_model.eval()
-        from src.logging.sample_logger import ValidationSampleLogger
+        from src.loggers.sample_logger import ValidationSampleLogger
 
         logger = ValidationSampleLogger(log_dir=str(tmp_path), samples_per_gpu=2)
 
