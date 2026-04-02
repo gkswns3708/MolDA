@@ -1,8 +1,8 @@
 # SMILES toy set: 빠른 검증용 100-sample split
 tag: SMILES_toy100
-root: dataset
+root: dataset/Processed/SMILES/toy100
 
 splits:
-  train: Train_SMILES_toy100
-  val: Val_SMILES_toy100
-  test: Test_SMILES_toy100
+  train: Train
+  val: Val
+  test: Test

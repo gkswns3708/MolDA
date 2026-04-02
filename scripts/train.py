@@ -3,11 +3,20 @@ MolDA training entry point (Hydra).
 
 Usage:
     cd /opt/11-MolDA/New_MolDA
-    python scripts/train.py --config-name toy
+
+    # Experiment configs (실제 실험):
+    python scripts/train.py +experiment=selfies_dict trainer=stage1
+    python scripts/train.py +experiment=selfies_nodict trainer=stage1
+    python scripts/train.py +experiment=smiles_nodict trainer=stage1
+
+    # Toy configs (디버깅/테스트):
+    python scripts/train.py --config-name toy_SELFIES
+    python scripts/train.py --config-name toy_SMILES
 
     # Override examples:
-    python scripts/train.py --config-name toy hardware.devices="'0,1'"
-    python scripts/train.py --config-name toy training.max_steps=100
+    python scripts/train.py +experiment=selfies_dict trainer=stage1 hardware.devices="'0,1'"
+    python scripts/train.py +experiment=selfies_dict trainer=stage2 \
+        pretrained_ckpt_path=./checkpoint/selfies_dict/stage1/last.ckpt
 """
 
 import sys
@@ -30,7 +39,7 @@ from src.training.trainer import MolDATrainer
 from src.data.datamodule import MolDADataModule
 
 
-@hydra.main(config_path="../src/configs", config_name="toy", version_base="1.3")
+@hydra.main(config_path="../src/configs", config_name="default", version_base="1.3")
 def main(cfg: DictConfig):
     print(OmegaConf.to_yaml(cfg))
     pl.seed_everything(cfg.seed)
@@ -96,6 +105,16 @@ def main(cfg: DictConfig):
         )
         loggers.append(wandb_logger)
 
+    # Compute accumulate_grad_batches from global_batch_size
+    num_devices = len(device_list)
+    per_gpu_bs = cfg.training.batch_size
+    global_bs = cfg.training.global_batch_size
+    assert global_bs % (per_gpu_bs * num_devices) == 0, (
+        f"global_batch_size({global_bs}) must be divisible by "
+        f"batch_size({per_gpu_bs}) × devices({num_devices}) = {per_gpu_bs * num_devices}"
+    )
+    accumulate_grad_batches = global_bs // (per_gpu_bs * num_devices)
+
     # Trainer
     trainer = pl.Trainer(
         accelerator=cfg.hardware.accelerator,
@@ -104,7 +123,7 @@ def main(cfg: DictConfig):
         strategy=strategy,
         max_epochs=cfg.training.max_epochs,
         max_steps=cfg.training.max_steps,
-        accumulate_grad_batches=cfg.training.accumulate_grad_batches,
+        accumulate_grad_batches=accumulate_grad_batches,
         gradient_clip_val=cfg.training.gradient_clip_val,
         callbacks=callbacks,
         logger=loggers,

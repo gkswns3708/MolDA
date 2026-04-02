@@ -76,7 +76,7 @@ New_MolDA/
 - [x] `src/model/` — MolDA, LLaDAWrapper (LoRA + vocab expansion), GNN/QFormer stubs
 - [x] `src/training/` — MolDATrainer, MaskedDiffusionLoss, Metrics, WSD Scheduler
 - [x] `src/generation/` — generate wrapper + generate_with_logging
-- [x] `src/logging/` — ValidationSampleLogger, StepwiseLogger
+- [x] `src/loggers/` — ValidationSampleLogger, StepwiseLogger
 - [x] `scripts/train.py` — Hydra entry point
 - [x] `test/` — 13 test files (unit + integration + e2e)
 
@@ -98,6 +98,9 @@ New_MolDA/
 - `Old_MolDA/model/blip2_stage3.py` — LightningModule
 - `Old_MolDA/data_utils.py` — DataCollator
 - `Old_MolDA/configs/` — Hydra config 구조
+
+## TODO
+- **Per-task loss logging 병목 모니터링**: `trainer.py`의 `training_step`에서 per-task loss/loss_no_eos를 wandb에 로깅 중. 현재는 batch 내 unique task 수만큼 `self.log()` 호출 + `torch.tensor()` boolean mask 생성. Task 종류가 많아지거나 batch_size가 커지면 병목이 될 수 있음. 병목 확인 시 → (1) `self.log()` 호출을 줄이기 위해 dict 기반 batch logging, (2) boolean mask를 미리 collator에서 계산, (3) N step마다만 per-task 로깅 등의 최적화 적용.
 
 ## 세부 문서
 - 아키텍처 상세 → `docs/ARCHITECTURE.md`

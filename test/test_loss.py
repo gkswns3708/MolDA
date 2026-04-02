@@ -93,6 +93,8 @@ class TestForward:
         result = loss_fn(logits, input_ids, labels, mask_indices, p_mask)
         assert "loss" in result
         assert "answer_length_mean" in result
+        assert "per_sample_loss" in result
+        assert "per_sample_loss_no_eos" in result
 
     def test_loss_is_finite_scalar(self):
         logits, input_ids, labels, mask_indices, p_mask = self._make_logits_and_batch()
@@ -116,6 +118,39 @@ class TestForward:
         result = loss_fn(logits, input_ids, labels, mask_indices, p_mask)
         expected_mean = (labels != -100).sum(dim=1).float().mean().item()
         assert result["answer_length_mean"] == pytest.approx(expected_mean, rel=1e-5)
+
+    def test_per_sample_loss_shape(self):
+        B = 4
+        logits, input_ids, labels, mask_indices, p_mask = self._make_logits_and_batch(batch_size=B)
+        loss_fn = MaskedDiffusionLoss()
+        result = loss_fn(logits, input_ids, labels, mask_indices, p_mask)
+        assert result["per_sample_loss"].shape == (B,)
+        assert result["per_sample_loss_no_eos"].shape == (B,)
+
+    def test_per_sample_loss_mean_equals_loss(self):
+        logits, input_ids, labels, mask_indices, p_mask = self._make_logits_and_batch()
+        loss_fn = MaskedDiffusionLoss()
+        result = loss_fn(logits, input_ids, labels, mask_indices, p_mask)
+        assert result["per_sample_loss"].mean().item() == pytest.approx(
+            result["loss"].item(), rel=1e-4
+        )
+
+    def test_loss_no_eos_leq_loss(self):
+        """loss_no_eos should generally differ from loss (different normalization)."""
+        logits, input_ids, labels, mask_indices, p_mask = self._make_logits_and_batch()
+        loss_fn = MaskedDiffusionLoss()
+        result = loss_fn(logits, input_ids, labels, mask_indices, p_mask)
+        # Both should be finite positive
+        assert torch.isfinite(result["per_sample_loss_no_eos"]).all()
+        assert (result["per_sample_loss_no_eos"] > 0).all()
+
+    def test_per_sample_loss_no_grad(self):
+        """per_sample_loss tensors should be detached (no grad)."""
+        logits, input_ids, labels, mask_indices, p_mask = self._make_logits_and_batch()
+        loss_fn = MaskedDiffusionLoss()
+        result = loss_fn(logits, input_ids, labels, mask_indices, p_mask)
+        assert not result["per_sample_loss"].requires_grad
+        assert not result["per_sample_loss_no_eos"].requires_grad
 
 
 class TestEdgeCases:

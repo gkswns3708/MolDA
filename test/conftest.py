@@ -87,7 +87,7 @@ def load_config(config_name: str = "toy_SELFIES") -> OmegaConf:
     # 6. Test-specific overrides
     test_overrides = {
         "hardware": {"devices": "0"},
-        "training": {"accumulate_grad_batches": 1},
+        "training": {"global_batch_size": 4},  # 1 device × batch_size 4 × accum 1
         "data": {"root": DATASET_ROOT},
         "tokenizer": {
             "selfies_dict_path": os.path.join(PROJECT_ROOT, "src", "model", "selfies_dict.txt"),

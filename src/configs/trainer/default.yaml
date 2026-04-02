@@ -8,7 +8,7 @@ stage: 1
 # ─────────────────────────────────────────────
 hardware:
   accelerator: gpu
-  devices: "0,1,2,3"
+  devices: "0,1,2,3,4,5,6,7"
   precision: bf16-mixed
   num_workers: 0
   # LoRA frozen base param이 존재하므로 DDP backward 전 확인 필요
@@ -32,6 +32,7 @@ lora:
   alpha: 32
   dropout: 0.05
   config_path: null         # lora config json 경로 (null이면 위 값으로 자동 생성)
+  modules_to_save: [wte]    # PEFT에서 full-parameter 학습할 모듈. weight_tying=False면 [wte, ff_out]으로 override
 
 # ─────────────────────────────────────────────
 # Q-Former
@@ -59,8 +60,7 @@ training:
   max_steps: -1             # -1: epoch 기반
   max_epochs: 3
   batch_size: 4             # per-GPU batch size
-  accumulate_grad_batches: 32
-  # effective_batch_size = batch_size × devices × accumulate_grad_batches
+  global_batch_size: 1024    # = batch_size × devices × accumulate_grad_batches (자동 계산)
   optimizer: adamw
   weight_decay: 0.1
   gradient_clip_val: 1.0
@@ -144,6 +144,10 @@ logging:
   # weight norm 모니터링 대상 layer
   weight_norm_layers: [wte, lora]
   weight_norm_interval: 10
+  # train prediction logging (masked position별 예측 상세)
+  log_train_predictions: true              # train prediction metrics (accuracy, target_prob) on/off
+  train_prediction_log_interval: 10       # 상세 sample log 간격 (global steps)
+  train_prediction_max_positions: 512       # 상세 로그에 포함할 최대 position 수
   # NaN 발생 시 sample index, input_ids, task 기록
   log_nan_details: true
   nan_log_dir: ./nan_logs

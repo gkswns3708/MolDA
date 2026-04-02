@@ -1,0 +1,25 @@
+# @package _global_
+# ───────────────────────────────────────────────────
+# Experiment A: SELFIES + molecular dictionary
+# ───────────────────────────────────────────────────
+# Usage:
+#   python scripts/train.py +experiment=selfies_dict trainer=stage1
+#   python scripts/train.py +experiment=selfies_dict trainer=stage2 \
+#       pretrained_ckpt_path=./checkpoint/selfies_dict/stage1/last.ckpt
+
+defaults:
+  - override /data: SELFIES_raw_v1
+
+tokenizer:
+  mol_token_type: selfies
+  add_mol_dict: true
+
+wandb:
+  enabled: true
+  project: MolDA
+  run_name: selfies_dict_s${stage}
+  tags: [selfies, dict, raw_v1]
+  group: selfies_dict
+
+logging:
+  dir: ./checkpoint/selfies_dict/stage${stage}

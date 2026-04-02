@@ -1,0 +1,27 @@
+# @package _global_
+# ───────────────────────────────────────────────────
+# Experiment C: SMILES without dictionary
+# ───────────────────────────────────────────────────
+# SMILES + add_mol_dict=true 는 미구현 (NotImplementedError)
+#
+# Usage:
+#   python scripts/train.py +experiment=smiles_nodict trainer=stage1
+#   python scripts/train.py +experiment=smiles_nodict trainer=stage2 \
+#       pretrained_ckpt_path=./checkpoint/smiles_nodict/stage1/last.ckpt
+
+defaults:
+  - override /data: SMILES_raw_v1
+
+tokenizer:
+  mol_token_type: smiles
+  add_mol_dict: false
+
+wandb:
+  enabled: true
+  project: MolDA
+  run_name: smiles_nodict_s${stage}
+  tags: [smiles, no-dict, raw_v1]
+  group: smiles_nodict
+
+logging:
+  dir: ./checkpoint/smiles_nodict/stage${stage}

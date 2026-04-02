@@ -40,14 +40,14 @@ class LLaDAWrapper(nn.Module):
         n_added = self._add_special_tokens()
         logger.info(f"Added {n_added} special tokens. Vocab: {len(self._tokenizer)}")
 
-        # 3. Load model with weight_tying=True override
-        #    - mol_llm_official(OPT/Galactica)과 변인통제: tie_word_embeddings=True
-        #    - LLaDA checkpoint은 weight_tying=False로 저장됨 → True로 override
-        #    - ff_out weight는 버려지고, wte가 input+output 모두 담당
+        # 3. Load model with weight_tying override
+        #    - weight_tying=True: wte가 input+output 모두 담당 (ff_out 버려짐)
+        #    - weight_tying=False: wte(input)와 ff_out(output) 별도 사용
+        self._weight_tying = getattr(cfg.model, "weight_tying", True)
         llm_config = AutoConfig.from_pretrained(
             cfg.model.llm, trust_remote_code=True
         )
-        llm_config.weight_tying = True
+        llm_config.weight_tying = self._weight_tying
         self._model = AutoModelForCausalLM.from_pretrained(
             cfg.model.llm,
             config=llm_config,
@@ -56,15 +56,16 @@ class LLaDAWrapper(nn.Module):
         )
 
         # 4. Resize embeddings with mean init
-        #    weight_tying=True → output은 wte를 재사용하므로 input만 resize하면 됨
         self._resize_embeddings_mean()
 
-        # 5. Apply LoRA (wte는 modules_to_save로 trainable)
+        # 5. Apply LoRA
         self._apply_lora()
 
         # 6. Log trainable parameters
-        #    weight_tying=True: wte 학습 = output logits도 자동 업데이트
-        logger.info("weight_tying=True: wte managed by PEFT modules_to_save (tied to output)")
+        if self._weight_tying:
+            logger.info("weight_tying=True: wte managed by PEFT modules_to_save (tied to output)")
+        else:
+            logger.info("weight_tying=False: wte + ff_out managed by PEFT modules_to_save (separate)")
 
     @property
     def tokenizer(self):
@@ -193,9 +194,7 @@ class LLaDAWrapper(nn.Module):
                 "q_proj", "k_proj", "v_proj", "o_proj",
                 "gate_proj", "up_proj", "down_proj",
             ],
-            # wte(input embed)를 PEFT modules_to_save로 관리.
-            # weight_tying=True이므로 wte가 output logits에도 사용됨 → 별도 ff_out 불필요.
-            modules_to_save=["wte"],
+            modules_to_save=list(lora_cfg.modules_to_save),
             bias="none",
         )
         self._model = get_peft_model(self._model, lora_config)

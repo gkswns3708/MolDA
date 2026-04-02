@@ -1,6 +1,6 @@
 defaults:
   - trainer: default      # 커맨드라인에서 trainer=stage1/2/3으로 교체
-  - data: toy100
+  - data: SELFIES_raw_v1  # 기본값; experiment config 또는 CLI에서 override
   - gnn: gine_tokengt
   - _self_
 
@@ -18,7 +18,7 @@ pretrained_ckpt_path: null
 wandb:
   enabled: false
   entity: null
-  project: molda
+  project: MolDA
   run_name: null          # null → wandb 자동 생성
   id: null                # 특정 run 재개 시 설정
   tags: []                # 실험 분류 (e.g., [stage1, smiles])
@@ -31,3 +31,17 @@ wandb:
 shuffle_selfies: false
 shuffle_graph: false
 process_disjoint: true
+
+# Hydra: cwd를 바꾸지 않음 → 상대 경로가 project root 기준으로 동작
+hydra:
+  run:
+    dir: .                  # cwd 고정 (상대 경로 유지)
+  sweep:
+    dir: .
+  job:
+    chdir: false            # cwd 변경 안 함
+  output_subdir: logs/.hydra   # hydra config 저장 위치
+  job_logging:
+    handlers:
+      file:
+        filename: logs/train.log

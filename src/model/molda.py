@@ -32,6 +32,7 @@ class MolDA(nn.Module):
             mask_token_id=MASK_TOKEN_ID,
             log_nan=cfg.logging.get("log_nan_details", True),
             nan_log_dir=cfg.logging.get("nan_log_dir", "./nan_logs"),
+            eos_token_id=self.llada.tokenizer.eos_token_id,
         )
 
         # Stage 2+: GNN + Q-Former (stubs for now)
@@ -68,7 +69,7 @@ class MolDA(nn.Module):
         )
         logits = outputs.logits  # [B, L, V]
 
-        # 3. Compute loss
+        # 3. Compute loss (+ prediction metrics)
         loss_dict = self.loss_fn(
             logits=logits,
             input_ids=input_ids,
@@ -77,7 +78,12 @@ class MolDA(nn.Module):
             p_mask=p_mask,
             tasks=batch.get("tasks"),
             global_step=batch.get("global_step", 0),
+            log_train_detail=batch.get("_log_train_detail", False),
         )
+
+        # Attach attention_mask for text decoding in train prediction logger
+        if "_train_sample_detail" in loss_dict and attention_mask is not None:
+            loss_dict["_train_sample_detail"]["attention_mask"] = attention_mask[0].cpu()
 
         return loss_dict
 

@@ -25,9 +25,11 @@ EPS = 1e-3
 class MaskedDiffusionLoss(nn.Module):
 
     def __init__(self, mask_token_id: int = MASK_TOKEN_ID, eps: float = EPS,
-                 log_nan: bool = True, nan_log_dir: str = "./nan_logs"):
+                 log_nan: bool = True, nan_log_dir: str = "./nan_logs",
+                 eos_token_id: int = None):
         super().__init__()
         self.mask_token_id = mask_token_id
+        self.eos_token_id = eos_token_id
         self.eps = eps
         self.log_nan = log_nan
         self.nan_log_dir = nan_log_dir
@@ -69,7 +71,8 @@ class MaskedDiffusionLoss(nn.Module):
 
     def forward(self, logits: torch.Tensor, input_ids: torch.Tensor,
                 labels: torch.Tensor, mask_indices: torch.Tensor,
-                p_mask: torch.Tensor, tasks=None, global_step: int = 0) -> dict:
+                p_mask: torch.Tensor, tasks=None, global_step: int = 0,
+                log_train_detail: bool = False) -> dict:
         """Compute masked diffusion SFT loss.
 
         Args:
@@ -82,7 +85,8 @@ class MaskedDiffusionLoss(nn.Module):
             global_step: current training step for NaN logging
 
         Returns:
-            dict with "loss" and "answer_length_mean"
+            dict with "loss", "answer_length_mean",
+            "per_sample_loss" [B], "per_sample_loss_no_eos" [B]
         """
         b, l = input_ids.shape
         device = input_ids.device
@@ -110,10 +114,86 @@ class MaskedDiffusionLoss(nn.Module):
         if ce_loss.isnan() and self.log_nan:
             self._log_nan(input_ids, labels, mask_indices, tasks, global_step)
 
-        return {
+        # --- Per-sample & no-EOS metrics (detached, for logging only) ---
+        with torch.no_grad():
+            # Scatter importance-weighted token losses to [B, L]
+            weighted = torch.zeros(b, l, device=device)
+            weighted[mask_indices] = token_loss.detach()
+
+            per_sample_loss = weighted.sum(dim=1) / answer_lengths.squeeze(1)  # [B]
+
+            # EOS mask: answer region 내 모든 EOS 토큰 위치
+            eos_mask = (input_ids == self.eos_token_id) & answer_mask  # [B, L]
+            eos_counts = eos_mask.sum(dim=1)  # [B]
+
+            # Loss excluding all EOS tokens, re-normalized by content length
+            no_eos_weighted = weighted.clone()
+            no_eos_weighted[eos_mask] = 0.0
+            content_lengths = (answer_lengths.squeeze(1) - eos_counts).clamp(min=1)
+            per_sample_loss_no_eos = no_eos_weighted.sum(dim=1) / content_lengths  # [B]
+
+            # --- Prediction quality metrics at masked positions ---
+            masked_logits = logits[mask_indices]          # [N_masked, V]
+            masked_targets = input_ids[mask_indices]      # [N_masked]
+            pred_tokens = masked_logits.argmax(dim=-1)    # [N_masked]
+
+            mask_accuracy = (pred_tokens == masked_targets).float().mean().item()
+
+            # EOS 제외 accuracy
+            eos_at_masked = (masked_targets == self.eos_token_id)
+            non_eos_mask = ~eos_at_masked
+            if non_eos_mask.any():
+                mask_accuracy_no_eos = (pred_tokens[non_eos_mask] == masked_targets[non_eos_mask]).float().mean().item()
+            else:
+                mask_accuracy_no_eos = 0.0
+
+            log_probs = F.log_softmax(masked_logits, dim=-1)
+            target_log_probs = log_probs.gather(
+                1, masked_targets.unsqueeze(1)
+            ).squeeze(1)
+            target_prob_mean = target_log_probs.exp().mean().item()
+
+        result = {
             "loss": ce_loss,
             "answer_length_mean": answer_lengths.mean().item(),
+            "per_sample_loss": per_sample_loss,
+            "per_sample_loss_no_eos": per_sample_loss_no_eos,
+            "mask_accuracy": mask_accuracy,
+            "mask_accuracy_no_eos": mask_accuracy_no_eos,
+            "target_prob_mean": target_prob_mean,
         }
+
+        # --- Detailed sample data (conditional, first sample only) ---
+        if log_train_detail:
+            with torch.no_grad():
+                s_mask = mask_indices[0]                       # [L] bool
+                s_logits = logits[0, s_mask]                   # [N_i, V]
+                s_targets = input_ids[0, s_mask]               # [N_i]
+                s_preds = s_logits.argmax(dim=-1)              # [N_i]
+                s_probs = F.softmax(s_logits, dim=-1)          # [N_i, V]
+
+                result["_train_sample_detail"] = {
+                    "mask_positions": s_mask.nonzero().squeeze(-1).cpu(),
+                    "target_tokens": s_targets.cpu(),
+                    "pred_tokens": s_preds.cpu(),
+                    "target_probs": s_probs.gather(
+                        1, s_targets.unsqueeze(1)
+                    ).squeeze(1).cpu(),
+                    "pred_probs": s_probs.gather(
+                        1, s_preds.unsqueeze(1)
+                    ).squeeze(1).cpu(),
+                    "p_mask": p_mask[0].item(),
+                }
+
+                # Full-sequence data for human-readable text logging
+                s_answer_mask = answer_mask[0]                          # [L] bool
+                s_all_pred_ids = logits[0].argmax(dim=-1)               # [L]
+                result["_train_sample_detail"]["input_ids"] = input_ids[0].cpu()
+                result["_train_sample_detail"]["labels"] = labels[0].cpu()
+                result["_train_sample_detail"]["all_answer_pred_ids"] = s_all_pred_ids[s_answer_mask].cpu()
+                result["_train_sample_detail"]["all_answer_gt_ids"] = input_ids[0, s_answer_mask].cpu()
+
+        return result
 
     def _log_nan(self, input_ids, labels, mask_indices, tasks, global_step):
         logger.warning(f"NaN loss at step {global_step}")
