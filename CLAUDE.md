@@ -76,7 +76,7 @@ New_MolDA/
 - [x] `src/model/` — MolDA, LLaDAWrapper (LoRA + vocab expansion), GNN/QFormer stubs
 - [x] `src/training/` — MolDATrainer, MaskedDiffusionLoss, Metrics, WSD Scheduler
 - [x] `src/generation/` — generate wrapper + generate_with_logging
-- [x] `src/logging/` — ValidationSampleLogger, StepwiseLogger
+- [x] `src/loggers/` — ValidationSampleLogger, StepwiseLogger
 - [x] `scripts/train.py` — Hydra entry point
 - [x] `test/` — 13 test files (unit + integration + e2e)
 
