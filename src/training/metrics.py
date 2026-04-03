@@ -134,7 +134,7 @@ def classification_evaluate(probs: "torch.Tensor", label_texts: List[str],
         dict with accuracy, f1, roc_auc, failure_rate
     """
     import torch
-    from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+    from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, precision_score, recall_score
 
     gt_labels = []
     valid_indices = []
@@ -145,7 +145,7 @@ def classification_evaluate(probs: "torch.Tensor", label_texts: List[str],
             valid_indices.append(i)
 
     if not gt_labels:
-        return {"accuracy": 0.0, "f1": 0.0, "roc_auc": 0.0, "failure_rate": 1.0}
+        return {"accuracy": 0.0, "f1": 0.0, "precision": 0.0, "recall": 0.0, "roc_auc": 0.0, "failure_rate": 1.0}
 
     gt = np.array(gt_labels)
     prob_true = probs[valid_indices, 1].cpu().numpy()
@@ -154,6 +154,8 @@ def classification_evaluate(probs: "torch.Tensor", label_texts: List[str],
     results = {
         "accuracy": float(accuracy_score(gt, preds)),
         "f1": float(f1_score(gt, preds, zero_division=0)),
+        "precision": float(precision_score(gt, preds, zero_division=0)),
+        "recall": float(recall_score(gt, preds, zero_division=0)),
         "failure_rate": 1.0 - len(valid_indices) / len(label_texts),
     }
 
@@ -193,7 +195,7 @@ def regression_evaluate(pred_texts: List[str], label_texts: List[str],
     n_valid = len(preds)
 
     if n_valid == 0:
-        return {"mae": float("inf"), "rmse": float("inf"), "failure_rate": 1.0}
+        return {"mae": float("inf"), "mse": float("inf"), "rmse": float("inf"), "failure_rate": 1.0}
 
     preds = np.array(preds)
     gts = np.array(gts)
@@ -201,6 +203,7 @@ def regression_evaluate(pred_texts: List[str], label_texts: List[str],
 
     return {
         "mae": float(errors.mean()),
+        "mse": float((errors ** 2).mean()),
         "rmse": float(np.sqrt((errors ** 2).mean())),
         "failure_rate": 1.0 - n_valid / n_total,
     }
@@ -211,24 +214,28 @@ def regression_evaluate(pred_texts: List[str], label_texts: List[str],
 # ─────────────────────────────────────────────
 
 def molecule_evaluate(pred_texts: List[str], label_texts: List[str],
-                      task: str) -> Dict[str, float]:
+                      task: str, tokenizer=None) -> Dict[str, float]:
     """Evaluate molecule generation (reaction, text2mol) by parsing SELFIES.
 
     Args:
         pred_texts: model-generated strings containing <SELFIES>...</SELFIES>
         label_texts: ground truth strings
+        tokenizer: HF tokenizer for BLEU tokenization (bleu_smiles, bleu_selfies)
 
     Returns:
-        dict with validity_ratio, exact_match_ratio, levenshtein_score, failure_rate
+        dict with validity_ratio, exact_match_ratio, fingerprint similarities,
+        bleu_smiles, bleu_selfies, levenshtein_score, failure_rate
     """
     try:
         import selfies as sf
         from rdkit import Chem
-        from rdkit.Chem import MACCSkeys, DataStructs
+        from rdkit.Chem import MACCSkeys, AllChem, DataStructs
     except ImportError:
         logger.warning("selfies/rdkit not installed, returning empty metrics")
         return {"validity_ratio": 0.0, "exact_match_ratio": 0.0,
-                "maccs_fts": 0.0, "failure_rate": 1.0}
+                "maccs_fts": 0.0, "rdk_fts": 0.0, "morgan_fts": 0.0,
+                "bleu_smiles": 0.0, "bleu_selfies": 0.0,
+                "levenshtein_score": 0.0, "failure_rate": 1.0}
 
     n_total = len(pred_texts)
     n_valid_smiles = 0
@@ -236,6 +243,11 @@ def molecule_evaluate(pred_texts: List[str], label_texts: List[str],
     n_parsed = 0
     levenshtein_scores = []
     maccs_scores = []
+    rdk_scores = []
+    morgan_scores = []
+    # For BLEU: tokenized canonical SMILES/SELFIES pairs
+    ref_smiles_list, pred_smiles_list = [], []
+    ref_selfies_list, pred_selfies_list = [], []
 
     for pred, gt in zip(pred_texts, label_texts):
         pred_selfies = _parse_tag(pred, "SELFIES")
@@ -263,12 +275,30 @@ def molecule_evaluate(pred_texts: List[str], label_texts: List[str],
                 if pred_canonical == gt_canonical:
                     n_exact_match += 1
 
-        # MACCS Fingerprint Tanimoto Similarity
+                # BLEU tokenization (only when both are valid + canonical)
+                if tokenizer is not None:
+                    pred_canonical_selfies = sf.encoder(pred_canonical)
+                    gt_canonical_selfies = sf.encoder(gt_canonical)
+                    pred_smiles_list.append(tokenizer.tokenize(pred_canonical))
+                    ref_smiles_list.append([tokenizer.tokenize(gt_canonical)])
+                    pred_selfies_list.append(tokenizer.tokenize(pred_canonical_selfies))
+                    ref_selfies_list.append([tokenizer.tokenize(gt_canonical_selfies)])
+
+        # Fingerprint Tanimoto Similarities
         if pred_mol is not None and gt_mol is not None:
             try:
+                # MACCS
                 fp_pred = MACCSkeys.GenMACCSKeys(pred_mol)
                 fp_gt = MACCSkeys.GenMACCSKeys(gt_mol)
                 maccs_scores.append(DataStructs.TanimotoSimilarity(fp_pred, fp_gt))
+                # RDK
+                rdk_pred = Chem.RDKFingerprint(pred_mol)
+                rdk_gt = Chem.RDKFingerprint(gt_mol)
+                rdk_scores.append(DataStructs.TanimotoSimilarity(rdk_pred, rdk_gt))
+                # Morgan (radius=2)
+                morgan_pred = AllChem.GetMorganFingerprint(pred_mol, 2)
+                morgan_gt = AllChem.GetMorganFingerprint(gt_mol, 2)
+                morgan_scores.append(DataStructs.TanimotoSimilarity(morgan_pred, morgan_gt))
             except Exception:
                 pass
 
@@ -278,11 +308,31 @@ def molecule_evaluate(pred_texts: List[str], label_texts: List[str],
             max_len = max(len(pred_smiles), len(gt_smiles))
             levenshtein_scores.append(1.0 - lev / max_len if max_len > 0 else 1.0)
 
+    # BLEU scores
+    bleu_smiles, bleu_selfies = 0.0, 0.0
+    if pred_smiles_list:
+        try:
+            from nltk.translate.bleu_score import corpus_bleu
+            bleu_smiles = corpus_bleu(
+                ref_smiles_list, pred_smiles_list,
+                weights=(0.25, 0.25, 0.25, 0.25),
+            ) * 100
+            bleu_selfies = corpus_bleu(
+                ref_selfies_list, pred_selfies_list,
+                weights=(0.25, 0.25, 0.25, 0.25),
+            ) * 100
+        except ImportError:
+            pass
+
     return {
         "validity_ratio": n_valid_smiles / n_parsed if n_parsed > 0 else 0.0,
         "exact_match_ratio": n_exact_match / n_parsed if n_parsed > 0 else 0.0,
         "levenshtein_score": float(np.mean(levenshtein_scores)) if levenshtein_scores else 0.0,
         "maccs_fts": float(np.mean(maccs_scores)) if maccs_scores else 0.0,
+        "rdk_fts": float(np.mean(rdk_scores)) if rdk_scores else 0.0,
+        "morgan_fts": float(np.mean(morgan_scores)) if morgan_scores else 0.0,
+        "bleu_smiles": float(bleu_smiles),
+        "bleu_selfies": float(bleu_selfies),
         "failure_rate": 1.0 - n_parsed / n_total if n_total > 0 else 1.0,
     }
 
@@ -341,7 +391,7 @@ def caption_evaluate(pred_texts: List[str], label_texts: List[str],
     n_valid = len(preds_parsed)
 
     if n_valid == 0:
-        return {"bleu2": 0.0, "bleu4": 0.0, "meteor": 0.0, "rouge1": 0.0, "rougeL": 0.0, "failure_rate": 1.0}
+        return {"bleu2": 0.0, "bleu4": 0.0, "meteor": 0.0, "rouge1": 0.0, "rouge2": 0.0, "rougeL": 0.0, "failure_rate": 1.0}
 
     # BLEU
     try:
@@ -366,22 +416,25 @@ def caption_evaluate(pred_texts: List[str], label_texts: List[str],
     # ROUGE
     try:
         from rouge_score import rouge_scorer
-        scorer = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=True)
-        r1_scores, rl_scores = [], []
+        scorer = rouge_scorer.RougeScorer(["rouge1", "rouge2", "rougeL"], use_stemmer=True)
+        r1_scores, r2_scores, rl_scores = [], [], []
         for p, g in zip(preds_parsed, gts_parsed):
             scores = scorer.score(g, p)
             r1_scores.append(scores["rouge1"].fmeasure)
+            r2_scores.append(scores["rouge2"].fmeasure)
             rl_scores.append(scores["rougeL"].fmeasure)
         rouge1 = float(np.mean(r1_scores))
+        rouge2 = float(np.mean(r2_scores))
         rougeL = float(np.mean(rl_scores))
     except ImportError:
-        rouge1, rougeL = 0.0, 0.0
+        rouge1, rouge2, rougeL = 0.0, 0.0, 0.0
 
     return {
         "bleu2": float(bleu2),
         "bleu4": float(bleu4),
         "meteor": meteor,
         "rouge1": rouge1,
+        "rouge2": rouge2,
         "rougeL": rougeL,
         "failure_rate": 1.0 - n_valid / n_total,
     }
