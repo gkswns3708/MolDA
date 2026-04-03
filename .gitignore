@@ -11,7 +11,7 @@ checkpoint/
 test/*.xml
 test/*.log
 test/*.ini
-./claude
+.claude/
 docs/
 *.zip
 src/dataset
