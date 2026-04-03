@@ -9,7 +9,9 @@ Handles:
 - on_save_checkpoint: trainable params only
 """
 
+import json
 import logging
+import os
 from collections import defaultdict
 from itertools import product
 
@@ -64,9 +66,9 @@ class MolDATrainer(pl.LightningModule):
         vs = cfg.generation.get("val_strategies", ["random"])
         self._val_strategies = [vs] if isinstance(vs, str) else list(vs)
 
-        # Validation output buffers (reset each epoch)
-        self._val_cls_outputs = []   # (probs, label_texts, tasks)
-        self._val_gen_outputs = []   # (pred_texts, target_texts, tasks, strategy)
+        # Validation: JSONL file handles (initialized in on_validation_epoch_start)
+        self._val_cls_fh = None
+        self._val_gen_fh = None
 
         # Sample / stepwise / train prediction loggers (log_dir 확보 후 setup()에서 초기화)
         self._sample_logger = None
@@ -353,6 +355,76 @@ class MolDATrainer(pl.LightningModule):
             self._flush_metrics()
 
     # ─────────────────────────────────────────
+    # Validation JSONL helpers (DDP-safe)
+    # ─────────────────────────────────────────
+
+    def _val_jsonl_path(self, tag: str, rank: int = None) -> str:
+        """val-epoch{E}-step{S}-rank{R}-{tag}.jsonl 경로 반환."""
+        if rank is None:
+            rank = self.global_rank
+        log_dir = self.trainer.log_dir or "."
+        return os.path.join(
+            log_dir,
+            f"val-epoch{self.current_epoch}-step{self.global_step}-rank{rank}-{tag}.jsonl",
+        )
+
+    def _open_val_jsonl(self, tag: str):
+        """JSONL 파일을 append 모드로 열어 file handle 반환."""
+        path = self._val_jsonl_path(tag)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        return open(path, "a", encoding="utf-8")
+
+    def _write_jsonl(self, fh, record: dict):
+        """JSONL 파일에 한 줄 기록."""
+        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def _load_all_val_predictions(self, tag: str) -> list:
+        """Rank 0: 모든 rank의 JSONL 파일을 로드하여 병합."""
+        records = []
+        world_size = self.trainer.world_size
+        for rank in range(world_size):
+            path = self._val_jsonl_path(tag, rank=rank)
+            if not os.path.exists(path):
+                continue
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        records.append(json.loads(line))
+        return records
+
+    def _cleanup_val_jsonl(self, tag: str):
+        """사용 완료된 JSONL 파일 삭제."""
+        for rank in range(self.trainer.world_size):
+            path = self._val_jsonl_path(tag, rank=rank)
+            if os.path.exists(path):
+                os.remove(path)
+
+    def _save_final_predictions(self, cls_data: list, gen_data: list):
+        """Rank 0: 전체 prediction 결과를 영구 JSON 파일로 저장 (재현용).
+
+        Classification: task, probs [P(False), P(True)], label
+        Generation: task, strategy, pred_text, label_text
+        """
+        log_dir = self.trainer.log_dir or "."
+        pred_dir = os.path.join(log_dir, "val_predictions")
+        os.makedirs(pred_dir, exist_ok=True)
+
+        filename = f"predictions_epoch{self.current_epoch}_step{self.global_step}.json"
+        path = os.path.join(pred_dir, filename)
+
+        payload = {
+            "epoch": self.current_epoch,
+            "global_step": self.global_step,
+            "classification": cls_data,
+            "generation": gen_data,
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+
+        logger.info(f"Saved {len(cls_data)} cls + {len(gen_data)} gen predictions → {path}")
+
+    # ─────────────────────────────────────────
     # Validation
     # ─────────────────────────────────────────
 
@@ -382,8 +454,9 @@ class MolDATrainer(pl.LightningModule):
         logger.info(f"Loggers initialized: log_dir={log_dir}")
 
     def on_validation_epoch_start(self):
-        self._val_cls_outputs = []
-        self._val_gen_outputs = []  # (pred_texts, label_texts, tasks, strategy)
+        # Open per-rank JSONL files for this epoch
+        self._val_cls_fh = self._open_val_jsonl("cls")
+        self._val_gen_fh = self._open_val_jsonl("gen")
         if self._sample_logger:
             self._sample_logger.reset()
         if self._stepwise_logger:
@@ -410,7 +483,14 @@ class MolDATrainer(pl.LightningModule):
             )
             cls_labels = [target_texts[i] for i in cls_idx]
             cls_tasks = [tasks[i] for i in cls_idx]
-            self._val_cls_outputs.append((probs.cpu(), cls_labels, cls_tasks))
+            # Write to JSONL (per-rank, per-sample)
+            probs_cpu = probs.cpu()
+            for i, ci in enumerate(cls_idx):
+                self._write_jsonl(self._val_cls_fh, {
+                    "task": tasks[ci],
+                    "probs": probs_cpu[i].tolist(),
+                    "label": target_texts[ci],
+                })
 
             # Sample 수집 (GPU당 N개 제한)
             if self._sample_logger:
@@ -479,7 +559,14 @@ class MolDATrainer(pl.LightningModule):
                 gen_part = pred_ids[:, prompt_len:]
                 pred_texts = self.tokenizer.batch_decode(gen_part, skip_special_tokens=False)
 
-                self._val_gen_outputs.append((pred_texts, gen_labels, gen_tasks, strategy_key))
+                # Write to JSONL (per-rank, per-sample)
+                for i in range(len(gen_tasks)):
+                    self._write_jsonl(self._val_gen_fh, {
+                        "task": gen_tasks[i],
+                        "strategy": strategy_key,
+                        "pred_text": pred_texts[i],
+                        "label_text": gen_labels[i],
+                    })
 
                 # Sample 수집 (GPU당 N개 제한, strategy 포함)
                 if self._sample_logger:
@@ -490,58 +577,82 @@ class MolDATrainer(pl.LightningModule):
                         )
 
     def on_validation_epoch_end(self):
+        # Close JSONL file handles (flush to disk)
+        if self._val_cls_fh:
+            self._val_cls_fh.close()
+            self._val_cls_fh = None
+        if self._val_gen_fh:
+            self._val_gen_fh.close()
+            self._val_gen_fh = None
+
+        # Barrier: 모든 rank의 JSONL 쓰기 완료 대기
+        if self.trainer.world_size > 1:
+            torch.distributed.barrier()
+
+        # Sample logging: 모든 rank에서 per-rank TXT 저장
+        if self._sample_logger:
+            self._sample_logger.flush(
+                self.current_epoch, self.global_step,
+                rank=self.global_rank,
+            )
+
+        # Non-rank-0: metric 계산 없이 종료
+        if self.global_rank != 0:
+            return
+
+        # ═══ Rank 0 only: 전체 JSONL 로드 → metric 계산 → log ═══
+        cls_data = self._load_all_val_predictions("cls")
+        gen_data = self._load_all_val_predictions("gen")
+
         # --- Classification metrics ---
         cls_by_task = defaultdict(lambda: {"probs": [], "labels": []})
-        for probs, labels, tasks in self._val_cls_outputs:
-            for i, task in enumerate(tasks):
-                cls_by_task[task]["probs"].append(probs[i:i+1])
-                cls_by_task[task]["labels"].append(labels[i])
+        for item in cls_data:
+            cls_by_task[item["task"]]["probs"].append(item["probs"])
+            cls_by_task[item["task"]]["labels"].append(item["label"])
 
         for task, data in cls_by_task.items():
-            all_probs = torch.cat(data["probs"], dim=0)
+            all_probs = torch.tensor(data["probs"])
             metrics = classification_evaluate(all_probs, data["labels"], task)
             for k, v in metrics.items():
-                self.log(f"val/{task}/{k}", v, sync_dist=True)
+                self.log(f"val/{task}/{k}", v, sync_dist=False, rank_zero_only=True)
 
         # --- Generation metrics (strategy별 분리) ---
-        # key: (task, strategy)
         gen_by_key = defaultdict(lambda: {"preds": [], "labels": []})
-        for pred_texts, label_texts, tasks, strategy in self._val_gen_outputs:
-            for i, task in enumerate(tasks):
-                gen_by_key[(task, strategy)]["preds"].append(pred_texts[i])
-                gen_by_key[(task, strategy)]["labels"].append(label_texts[i])
+        for item in gen_data:
+            gen_by_key[(item["task"], item["strategy"])]["preds"].append(item["pred_text"])
+            gen_by_key[(item["task"], item["strategy"])]["labels"].append(item["label_text"])
 
         for (task, strategy), data in gen_by_key.items():
             task_type = get_task_type(task)
             if task_type == "regression":
                 metrics = regression_evaluate(data["preds"], data["labels"], task)
             elif task_type == "molecule":
-                metrics = molecule_evaluate(data["preds"], data["labels"], task)
+                metrics = molecule_evaluate(data["preds"], data["labels"], task,
+                                            tokenizer=self.tokenizer)
             elif task_type == "caption":
                 metrics = caption_evaluate(data["preds"], data["labels"], task)
             else:
                 continue
 
             for k, v in metrics.items():
-                self.log(f"val/{task}/{strategy}/{k}", v, sync_dist=True)
+                self.log(f"val/{task}/{strategy}/{k}", v,
+                         sync_dist=False, rank_zero_only=True)
 
-        # Sample logging: WandB Table (rank 0만, flush 전에 호출) + TXT 파일
+        # WandB Table logging (rank 0만)
         if self._sample_logger:
-            if self.global_rank == 0:
-                wandb_lg = self._get_wandb_logger()
-                if wandb_lg is not None:
-                    self._sample_logger.flush_to_wandb(
-                        wandb_lg.experiment,
-                        self.current_epoch, self.global_step,
-                    )
-            self._sample_logger.flush(
-                self.current_epoch, self.global_step,
-                rank=self.global_rank,
-            )
+            wandb_lg = self._get_wandb_logger()
+            if wandb_lg is not None:
+                self._sample_logger.flush_to_wandb(
+                    wandb_lg.experiment,
+                    self.current_epoch, self.global_step,
+                )
 
-        # Clear buffers
-        self._val_cls_outputs = []
-        self._val_gen_outputs = []
+        # 영구 prediction 저장 (재현용 JSON)
+        self._save_final_predictions(cls_data, gen_data)
+
+        # Cleanup temp JSONL
+        self._cleanup_val_jsonl("cls")
+        self._cleanup_val_jsonl("gen")
 
     # ─────────────────────────────────────────
     # WandB helpers
