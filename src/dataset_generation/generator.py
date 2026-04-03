@@ -130,8 +130,20 @@ def _process_moleculenet_sample(args):
         return None
 
 
+def _selfies_field_to_smiles(selfies_str):
+    """SELFIES 문자열을 SMILES로 변환. >> 구분자도 처리."""
+    if ">>" in selfies_str:
+        parts = selfies_str.split(">>")
+        converted = [selfies_to_smiles(p.strip()) for p in parts]
+        if any(c is None for c in converted):
+            return None
+        return ">>".join(converted)
+    smiles = selfies_to_smiles(selfies_str)
+    return smiles
+
+
 def _process_molinstruction_sample(args):
-    index, input_, label_, task, instruction_templates, is_bace = args
+    index, input_, label_, task, instruction_templates, is_selfies_input = args
     try:
         instruction = np.random.choice(instruction_templates)
         if pd.isna(input_) or pd.isna(label_):
@@ -139,11 +151,16 @@ def _process_molinstruction_sample(args):
         input_ = str(input_)
         label_ = str(label_)
 
-        if is_bace:
-            smiles = selfies_to_smiles(input_)
-            if smiles is None:
-                raise ValueError(f"SELFIES→SMILES conversion failed: {input_}")
-            input_ = smiles
+        # Mol-Instructions 데이터는 SELFIES 포맷 → SMILES로 변환
+        if is_selfies_input:
+            input_ = _selfies_field_to_smiles(input_)
+            if input_ is None:
+                raise ValueError("Input SELFIES→SMILES conversion failed")
+            # Reaction label도 SELFIES → SMILES 변환 필요
+            if task in REACTION_BENCHMARKS:
+                label_ = _selfies_field_to_smiles(label_)
+                if label_ is None:
+                    raise ValueError("Label SELFIES→SMILES conversion failed")
 
         if task in REACTION_BENCHMARKS:
             if task in ["reagent_prediction"]:
@@ -433,8 +450,11 @@ class MolInstructionDataset(Dataset):
             label_list = self.data["output"][:]
         self.instruction_templates = getattr(instructions_smol, self.task)
 
+        # All Mol-Instructions data uses SELFIES format (bace: SELFIES column, others: input column)
+        is_selfies_input = True
+
         args_list = [
-            (i, input_list[i], label_list[i], self.task, self.instruction_templates, is_bace)
+            (i, input_list[i], label_list[i], self.task, self.instruction_templates, is_selfies_input)
             for i in range(len(input_list))
         ]
 
