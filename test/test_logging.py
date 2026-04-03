@@ -5,9 +5,9 @@ import os
 import pytest
 import torch
 
-from src.logging.sample_logger import ValidationSampleLogger
-from src.logging.stepwise_logger import StepwiseLogger
-from src.logging.train_prediction_logger import TrainPredictionLogger
+from src.loggers.sample_logger import ValidationSampleLogger
+from src.loggers.stepwise_logger import StepwiseLogger
+from src.loggers.train_prediction_logger import TrainPredictionLogger
 
 
 # ─────────────────────────────────────────────

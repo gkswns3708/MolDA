@@ -6,7 +6,7 @@ import pytest
 import torch
 import wandb
 
-from src.logging.sample_logger import ValidationSampleLogger
+from src.loggers.sample_logger import ValidationSampleLogger
 
 
 # ─────────────────────────────────────────────
