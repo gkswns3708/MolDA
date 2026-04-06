@@ -10,7 +10,7 @@
 #       pretrained_ckpt_path=./checkpoint/smiles_nodict/stage1/last.ckpt
 
 defaults:
-  - override /data: SMILES_raw_v1
+  - override /data: raw_v1
 
 tokenizer:
   mol_token_type: smiles

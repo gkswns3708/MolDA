@@ -38,9 +38,13 @@ class MolDADataModule(pl.LightningDataModule):
         self.test_dataset = None
 
     def _resolve_path(self, split_name: str) -> str:
-        """Resolve data path: root + splits.{split_name} (cwd = project root)."""
+        """Resolve data path: dataset/Processed/{mol_type}/{root}/{split}."""
         data_cfg = self.cfg.data
-        return os.path.join(data_cfg.root, data_cfg.splits[split_name])
+        mol_type = self.cfg.tokenizer.mol_token_type.upper()
+        return os.path.join(
+            "dataset", "Processed", mol_type,
+            data_cfg.root, data_cfg.splits[split_name],
+        )
 
     def setup(self, stage=None):
         if stage in ("fit", None):

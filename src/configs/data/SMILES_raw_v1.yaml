@@ -1,8 +1,0 @@
-# SMILES full dataset (raw_v1)
-tag: SMILES_raw_v1
-root: dataset/Processed/SMILES/raw_v1
-
-splits:
-  train: Train
-  val: Val
-  test: Test

@@ -17,13 +17,13 @@ pretrained_ckpt_path: null
 
 wandb:
   enabled: false
-  entity: null
+  entity: hj_ai
   project: MolDA
   run_name: null          # null → wandb 자동 생성
   id: null                # 특정 run 재개 시 설정
   tags: []                # 실험 분류 (e.g., [stage1, smiles])
   group: null             # 실험 그룹핑 (e.g., "stage1_sweep")
-  log_freq: 10            # wandb.watch gradient 로깅 빈도 (steps)
+  log_freq: 3            # wandb.watch gradient 로깅 빈도 (steps)
   watch_model: false      # gradient/param histogram 로깅
   log_model: false        # checkpoint를 wandb Artifact로 저장
 

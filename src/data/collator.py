@@ -76,7 +76,7 @@ class TrainCollator:
             padded_input_ids.append(ids + [self.eos_token_id] * pad_len)
             # LLaDA SFT: padding EOS도 answer region에 포함 (GUIDELINES.md line 80)
             padded_labels.append(labs + [self.eos_token_id] * pad_len)
-            padded_attention_mask.append([1] * len(ids) + [0] * pad_len)
+            padded_attention_mask.append([1] * self.max_length)
 
         return {
             "input_ids": torch.tensor(padded_input_ids, dtype=torch.long),

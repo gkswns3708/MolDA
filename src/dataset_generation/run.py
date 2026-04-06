@@ -64,7 +64,7 @@ def run_single_config(config_name, config_dir, num_workers, toy_n):
             # representation별 data_tag 생성 (SELFIES_raw_v1 → 해당 repr 기준)
             sub_cfg = dict(cfg)
             sub_cfg["mol_representation"] = repr_name
-            sub_cfg["data_tag"] = f"{repr_name.upper()}_raw_v1"
+            sub_cfg["data_tag"] = "raw_v1"
             # 임시 yaml 파일 생성 없이 직접 실행
             _run_single_config_with_cfg(sub_cfg, config_name, num_workers, toy_n)
         return

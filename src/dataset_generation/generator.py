@@ -68,12 +68,12 @@ def wrap_label(label, task):
             elif "false" in label.lower() or "no" in label.lower():
                 label = "False"
             else:
-                label = "False"
+                raise ValueError(f"Unexpected classification label: {label!r} for task {task}")
             label = label_tokens[0] + " " + label + " " + label_tokens[1]
         elif isinstance(label, list):
             label_language = ", ".join(label)
-            label_boolean = "True" * len(label)
-            label = label_language + label_tokens[0] + " " + label_boolean + " " + label_tokens[1]
+            label_boolean = ", ".join(["True"] * len(label))
+            label = label_language + " " + label_tokens[0] + " " + label_boolean + " " + label_tokens[1]
         else:
             label = "True" if label else "False"
             label = label_tokens[0] + " " + label + " " + label_tokens[1]
@@ -219,7 +219,7 @@ def _process_smol_sample(args):
             try:
                 canonical = get_canonical_smiles(input_mol_string)
                 if canonical is None:
-                    canonical = "CC"
+                    raise ValueError(f"Invalid SMILES: {input_mol_string}")
                 graph = [smiles2data(canonical), get_dummy_graph()]
                 input_mol_string = canonical
             except Exception:

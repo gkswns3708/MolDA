@@ -1,8 +1,7 @@
 """
 Task-specific evaluation metrics.
 
-Task categorization is based on actual Train_toy100 dataset (21 tasks).
-Old_MolDA help_funcs.py 참고하되, toy dataset에 실제 존재하는 task만 포함.
+Task categorization synced with benchmark_constants.py (all benchmarks covered).
 """
 
 import logging
@@ -15,7 +14,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────
-# Task categorization (from Train_toy100 actual tasks)
+# Task categorization (synced with benchmark_constants.py)
 # ─────────────────────────────────────────────
 
 CLASSIFICATION_TASKS = {
@@ -24,6 +23,8 @@ CLASSIFICATION_TASKS = {
     "smol-property_prediction-hiv",
     "smol-property_prediction-sider",
     "bace",
+    "tox21",
+    "toxcast",
 }
 
 REGRESSION_TASKS = {
@@ -32,6 +33,19 @@ REGRESSION_TASKS = {
     "qm9_homo",
     "qm9_lumo",
     "qm9_homo_lumo_gap",
+    "qm9_dipole_moment",
+    "qm9_isotropic_polarizability",
+    "qm9_electronic_spatial_extent",
+    "qm9_zero_point_vibrational_energy",
+    "qm9_heat_capacity_298K",
+    "qm9_internal_energy_298K",
+    "qm9_enthalpy_298K",
+    "qm9_free_energy_298K",
+    "alchemy_homo",
+    "alchemy_lumo",
+    "alchemy_homo_lumo_gap",
+    "aqsol-logS",
+    "pcqm_homo_lumo_gap",
 }
 
 REACTION_TASKS = {
@@ -40,6 +54,12 @@ REACTION_TASKS = {
     "retrosynthesis",
     "smol-retrosynthesis",
     "reagent_prediction",
+    "presto-forward_reaction_prediction",
+    "presto-retrosynthesis",
+    "presto-reagent_prediction",
+    "orderly-forward_reaction_prediction",
+    "orderly-retrosynthesis",
+    "orderly-reagent_prediction",
 }
 
 TEXT2MOL_TASKS = {
@@ -54,6 +74,8 @@ MOL2TEXT_TASKS = {
 
 NAME_CONVERSION_TASKS = {
     "smol-name_conversion-i2s",
+    "smol-name_conversion-i2f",
+    "smol-name_conversion-s2f",
     "smol-name_conversion-s2i",
 }
 
@@ -105,11 +127,18 @@ def _parse_float_tag(text: str) -> Optional[float]:
 
 
 def _parse_boolean_tag(text: str) -> Optional[bool]:
-    """Extract boolean from <BOOLEAN>...</BOOLEAN>."""
+    """Extract boolean from <BOOLEAN>...</BOOLEAN>.
+
+    Multi-label case (e.g. "True, True, False"): returns True if any value is True.
+    """
     content = _parse_tag(text, "BOOLEAN")
     if content is None:
         return None
     content = content.strip().lower()
+    # Multi-label: comma-separated booleans → reduce to any-positive
+    if "," in content:
+        parts = [p.strip() for p in content.split(",")]
+        return any(p == "true" for p in parts)
     if content == "true":
         return True
     elif content == "false":
@@ -215,10 +244,12 @@ def regression_evaluate(pred_texts: List[str], label_texts: List[str],
 
 def molecule_evaluate(pred_texts: List[str], label_texts: List[str],
                       task: str, tokenizer=None) -> Dict[str, float]:
-    """Evaluate molecule generation (reaction, text2mol) by parsing SELFIES.
+    """Evaluate molecule generation (reaction, text2mol) by parsing SELFIES or SMILES.
+
+    Auto-detects tag format: tries <SELFIES> first, falls back to <SMILES>.
 
     Args:
-        pred_texts: model-generated strings containing <SELFIES>...</SELFIES>
+        pred_texts: model-generated strings containing <SELFIES>...</SELFIES> or <SMILES>...</SMILES>
         label_texts: ground truth strings
         tokenizer: HF tokenizer for BLEU tokenization (bleu_smiles, bleu_selfies)
 
@@ -250,19 +281,26 @@ def molecule_evaluate(pred_texts: List[str], label_texts: List[str],
     ref_selfies_list, pred_selfies_list = [], []
 
     for pred, gt in zip(pred_texts, label_texts):
+        # Auto-detect: SELFIES 태그 먼저 시도, 없으면 SMILES 태그
         pred_selfies = _parse_tag(pred, "SELFIES")
         gt_selfies = _parse_tag(gt, "SELFIES")
+        use_selfies = pred_selfies is not None and gt_selfies is not None
 
-        if pred_selfies is None or gt_selfies is None:
-            continue
+        if use_selfies:
+            # SELFIES → SMILES 변환
+            try:
+                pred_smiles = sf.decoder(pred_selfies)
+                gt_smiles = sf.decoder(gt_selfies)
+            except Exception:
+                continue
+        else:
+            # SMILES 태그 직접 파싱
+            pred_smiles = _parse_tag(pred, "SMILES")
+            gt_smiles = _parse_tag(gt, "SMILES")
+            if pred_smiles is None or gt_smiles is None:
+                continue
+
         n_parsed += 1
-
-        # SELFIES → SMILES
-        try:
-            pred_smiles = sf.decoder(pred_selfies)
-            gt_smiles = sf.decoder(gt_selfies)
-        except Exception:
-            continue
 
         # Validity
         pred_mol = Chem.MolFromSmiles(pred_smiles)
@@ -277,12 +315,13 @@ def molecule_evaluate(pred_texts: List[str], label_texts: List[str],
 
                 # BLEU tokenization (only when both are valid + canonical)
                 if tokenizer is not None:
-                    pred_canonical_selfies = sf.encoder(pred_canonical)
-                    gt_canonical_selfies = sf.encoder(gt_canonical)
                     pred_smiles_list.append(tokenizer.tokenize(pred_canonical))
                     ref_smiles_list.append([tokenizer.tokenize(gt_canonical)])
-                    pred_selfies_list.append(tokenizer.tokenize(pred_canonical_selfies))
-                    ref_selfies_list.append([tokenizer.tokenize(gt_canonical_selfies)])
+                    if use_selfies:
+                        pred_canonical_selfies = sf.encoder(pred_canonical)
+                        gt_canonical_selfies = sf.encoder(gt_canonical)
+                        pred_selfies_list.append(tokenizer.tokenize(pred_canonical_selfies))
+                        ref_selfies_list.append([tokenizer.tokenize(gt_canonical_selfies)])
 
         # Fingerprint Tanimoto Similarities
         if pred_mol is not None and gt_mol is not None:

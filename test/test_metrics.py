@@ -262,6 +262,47 @@ class TestMoleculeEvaluate:
         assert result["bleu_smiles"] == 0.0
         assert result["bleu_selfies"] == 0.0
 
+    # --- SMILES mode tests (H-1 fix) ---
+
+    def test_smiles_mode_exact_match(self):
+        """SMILES 태그로 입력 시 정상 평가"""
+        smiles_str = "<SMILES>CCO</SMILES>"
+        result = molecule_evaluate([smiles_str], [smiles_str], "forward_reaction_prediction")
+        if result.get("exact_match_ratio") is not None:
+            assert result["exact_match_ratio"] == 1.0
+        assert result["failure_rate"] == pytest.approx(0.0)
+
+    def test_smiles_mode_validity(self):
+        """SMILES 모드에서 valid/invalid 분자 구분"""
+        valid = "<SMILES>CCO</SMILES>"
+        invalid_pred = "<SMILES>INVALID_SMILES</SMILES>"
+        result = molecule_evaluate([invalid_pred], [valid], "forward_reaction_prediction")
+        assert result["failure_rate"] == pytest.approx(0.0)  # 파싱은 성공
+        assert result["validity_ratio"] == pytest.approx(0.0)  # invalid SMILES
+
+    def test_smiles_mode_fingerprints(self):
+        """SMILES 모드에서 fingerprint 유사도 계산"""
+        smiles_str = "<SMILES>CCO</SMILES>"
+        result = molecule_evaluate([smiles_str], [smiles_str], "forward_reaction_prediction")
+        if "maccs_fts" in result:
+            assert result["maccs_fts"] == pytest.approx(1.0, abs=1e-5)
+        if "morgan_fts" in result:
+            assert result["morgan_fts"] == pytest.approx(1.0, abs=1e-5)
+
+    def test_smiles_mode_no_tag_failure(self):
+        """SELFIES도 SMILES 태그도 없으면 failure_rate=1.0"""
+        result = molecule_evaluate(["no tag"], ["no tag"], "forward_reaction_prediction")
+        assert result["failure_rate"] == 1.0
+
+    def test_mixed_tags_graceful_skip(self):
+        """pred가 SMILES, gt가 SELFIES이면 해당 샘플 skip"""
+        pred = "<SMILES>CCO</SMILES>"
+        gt = "<SELFIES>[C][C][O]</SELFIES>"
+        result = molecule_evaluate([pred], [gt], "forward_reaction_prediction")
+        # SELFIES 먼저 시도 → pred에 SELFIES 없으므로 use_selfies=False
+        # SMILES fallback → gt에 SMILES 없으므로 skip
+        assert result["failure_rate"] == 1.0
+
 
 # ─────────────────────────────────────────────
 # Caption Evaluate

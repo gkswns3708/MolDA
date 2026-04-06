@@ -1,0 +1,8 @@
+# chebi-20 mol2text single-task dataset
+tag: chebi-20-mol2text
+root: chebi-20-mol2text
+
+splits:
+  train: Train
+  val: Val
+  test: Test

@@ -1,8 +1,0 @@
-# SELFIES full dataset (raw_v1)
-tag: SELFIES_chebi-20-mol2text_v1
-root: dataset/Processed/SELFIES/chebi-20-mol2text_v1
-
-splits:
-  train: Train
-  val: Val
-  test: Test

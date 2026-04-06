@@ -8,7 +8,7 @@
 #       pretrained_ckpt_path=./checkpoint/selfies_dict/stage1/last.ckpt
 
 defaults:
-  - override /data: SELFIES_raw_v1
+  - override /data: raw_v1
 
 tokenizer:
   mol_token_type: selfies

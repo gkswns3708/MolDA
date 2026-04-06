@@ -1,0 +1,8 @@
+# Toy set: 빠른 검증용 7-sample split
+tag: toy7
+root: toy7
+
+splits:
+  train: Train
+  val: Val
+  test: Test

@@ -186,6 +186,9 @@ class LLaDAWrapper(nn.Module):
     def _apply_lora(self):
         """Apply LoRA to attention and MLP layers."""
         lora_cfg = self.cfg.lora
+        # ff_out은 PEFT suffix 매칭으로 blocks.*.ff_out까지 trainable되므로 제외
+        safe_modules = [m for m in lora_cfg.modules_to_save if m != "ff_out"]
+
         lora_config = LoraConfig(
             r=lora_cfg.r,
             lora_alpha=lora_cfg.alpha,
@@ -194,11 +197,25 @@ class LLaDAWrapper(nn.Module):
                 "q_proj", "k_proj", "v_proj", "o_proj",
                 "gate_proj", "up_proj", "down_proj",
             ],
-            modules_to_save=list(lora_cfg.modules_to_save),
+            modules_to_save=safe_modules,
             bias="none",
         )
         self._model = get_peft_model(self._model, lora_config)
+
+        # weight_tying=False면 top-level ff_out(classifier)만 수동 unfreeze
+        if not self._weight_tying and "ff_out" in list(lora_cfg.modules_to_save):
+            self._unfreeze_output_head()
+
         logger.info(f"LoRA applied: r={lora_cfg.r}, alpha={lora_cfg.alpha}")
         self._model.print_trainable_parameters()
+
+    def _unfreeze_output_head(self):
+        """Top-level ff_out(최종 classifier)만 unfreeze. blocks.*.ff_out은 건드리지 않음."""
+        count = 0
+        for name, param in self._model.named_parameters():
+            if "ff_out" in name and "blocks." not in name:
+                param.requires_grad = True
+                count += 1
+        logger.info(f"Output head unfrozen: {count} params manually set to trainable")
 
 

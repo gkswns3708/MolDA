@@ -1,0 +1,59 @@
+# @package _global_
+# ───────────────────────────────────────────────────
+# Old run y8q73x0i 재현: stage1_Tpod_chebi_mol2text_10xHighLR_V4
+# wandb: https://wandb.ai/hj_ai/mol-llm_llada/runs/y8q73x0i
+# ───────────────────────────────────────────────────
+# Usage:
+#   python scripts/train.py +experiment=selfies_dict_smol-molecule_captioning trainer=stage1 'hardware.devices="1,2,3,4,5,6,7"'
+
+defaults:
+  - override /data: smol-molecule_captioning
+
+model:
+  weight_tying: false
+
+lora:
+  r: 16
+  modules_to_save: [wte, ff_out]
+
+tokenizer:
+  mol_token_type: selfies
+  add_mol_dict: true
+
+training:
+  max_epochs: 200
+  batch_size: 4
+  global_batch_size: 252    # 7GPU × 4 × accum9 = 252 (≈256)
+
+lr:
+  lora: 2.5e-4
+  embed_orig: 2.5e-3
+  embed_new: 2.5e-2
+  head_orig: 2.5e-3
+  head_new: 2.5e-2
+  other: 0.0
+
+scheduler:
+  warmup_steps: 100
+
+generation:
+  sampling_steps: 32
+  remasking_strategy: [low_confidence]
+  val_strategies: [random, semi_ar]
+  semi_ar:
+    enabled: false
+    block_size: 32
+
+validation:
+  check_val_every_n_epoch: 5
+
+wandb:
+  enabled: true
+  project: MolDA
+  run_name: selfies_dict_smol-mol_cap_highLR_s${stage}
+  tags: [selfies, dict, smol-molecule_captioning, highLR, reproduce-y8q73x0i]
+  group: selfies_dict_smol-mol_cap_highLR
+
+logging:
+  dir: ./checkpoint/selfies_dict_smol-mol_cap_highLR/stage${stage}
+  weight_norm_layers: [wte, ff_out, lora]

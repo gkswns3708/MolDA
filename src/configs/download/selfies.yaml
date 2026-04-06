@@ -1,5 +1,5 @@
 raw_data_root: /opt/11-MolDA/New_MolDA/dataset/Raw
-data_tag: SELFIES_raw_v1
+data_tag: raw_v1
 mol_representation: selfies
 llm_model: "GSAI-ML/LLaDA-8B-Instruct"
 

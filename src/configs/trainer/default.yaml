@@ -11,8 +11,8 @@ hardware:
   devices: "0,1,2,3,4,5,6,7"
   precision: bf16-mixed
   num_workers: 0
-  # LoRA frozen base param이 존재하므로 DDP backward 전 확인 필요
-  find_unused_parameters: true
+  # 각 stage별 별도 실행 + freeze 정책으로 requires_grad=False 설정하므로 불필요
+  find_unused_parameters: false
 
 # ─────────────────────────────────────────────
 # Model Architecture
@@ -59,8 +59,8 @@ tokenizer:
 training:
   max_steps: -1             # -1: epoch 기반
   max_epochs: 3
-  batch_size: 4             # per-GPU batch size
-  global_batch_size: 1024    # = batch_size × devices × accumulate_grad_batches (자동 계산)
+  batch_size: 3             # per-GPU batch size
+  global_batch_size: 896    # = batch_size × devices × accumulate_grad_batches (자동 계산)
   optimizer: adamw
   weight_decay: 0.1
   gradient_clip_val: 1.0
@@ -132,7 +132,7 @@ validation:
 # ─────────────────────────────────────────────
 logging:
   dir: ./checkpoint/stage1
-  log_every_n_steps: 10
+  log_every_n_steps: 2
   save_on_n_steps: 500      # N step마다 중간 checkpoint 저장
   save_top_k_checkpoints: -1
   save_every_n_epochs: 1       # validation 끝날 때마다 checkpoint 저장

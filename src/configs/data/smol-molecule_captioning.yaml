@@ -1,0 +1,8 @@
+# smol-molecule_captioning single-task dataset
+tag: smol-molecule_captioning
+root: smol-molecule_captioning
+
+splits:
+  train: Train
+  val: Val
+  test: Test

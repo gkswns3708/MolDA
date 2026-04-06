@@ -1,8 +1,0 @@
-# SELFIES toy set: 빠른 검증용 100-sample split
-tag: SELFIES_toy100
-root: dataset/Processed/SELFIES/toy100
-
-splits:
-  train: Train
-  val: Val
-  test: Test

@@ -80,11 +80,17 @@ New_MolDA/
 - [x] `scripts/train.py` — Hydra entry point
 - [x] `test/` — 13 test files (unit + integration + e2e)
 
+## 가상환경 (venv) 사용 규칙
+- **Dataset 생성 및 preprocessing**: `/opt/11-MolDA/New_MolDA/venvs/dataset_gen` 사용
+  - 예: `dataset_generator.py` 실행, 데이터 전처리 스크립트 등
+  - `datasets==2.16.1` 환경 (HF datasets Arrow 포맷 호환성)
+- **그 외 모든 작업 (학습, 추론, 테스트 등)**: `/opt/11-MolDA/New_MolDA/venvs/MolDA` 사용
+
 ## 핵심 설계 원칙
 1. **`src/official_LLaDA/generate.py` 수정 금지.** 래핑만 허용.
 2. **Dataset 버전은 Hydra `data` config의 `tag`로 관리.**
 3. **GNN: GINE와 TokenGT를 각각 forward → sequence dim concat → Q-Former 입력.**
-4. **DDP: DataLoader `drop_last=True`, `find_unused_parameters=True` 필수.**
+4. **DDP: DataLoader `drop_last=True` 필수. `find_unused_parameters=False` (각 stage 별도 실행 + freeze 정책으로 불필요).**
 5. **Train collator = right padding(EOS), Eval collator = left padding(PAD).**
 6. **Loss NaN 발생 시 sample index, input_ids, task를 log에 기록.**
 7. **Optimizer 5 param groups: LoRA / embed_orig / embed_new / head_orig+new / Q-Former+GNN.**
