@@ -24,6 +24,7 @@ training:
   max_epochs: 200
   batch_size: 4
   global_batch_size: 252    # 7GPU × 4 × accum9 = 252 (≈256)
+  loss_normalization: global
 
 lr:
   lora: 2.5e-4

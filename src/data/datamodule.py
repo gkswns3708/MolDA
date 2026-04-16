@@ -38,23 +38,53 @@ class MolDADataModule(pl.LightningDataModule):
         self.test_dataset = None
 
     def _resolve_path(self, split_name: str) -> str:
-        """Resolve data path: dataset/Processed/{mol_type}/{root}/{split}."""
+        """Resolve data path: dataset/Processed/{root}/{split}.
+
+        듀얼 컬럼 데이터셋은 mol_type 없이 단일 경로에 저장.
+        하위 호환: 기존 경로(dataset/Processed/{MOL_TYPE}/...)가 존재하면 그쪽 사용.
+        """
         data_cfg = self.cfg.data
+        # 새 경로: dataset/Processed/{root}/{split}
+        new_path = os.path.join(
+            "dataset", "Processed",
+            data_cfg.root, data_cfg.splits[split_name],
+        )
+        if os.path.exists(new_path):
+            return new_path
+
+        # 하위 호환: 기존 경로 dataset/Processed/{MOL_TYPE}/{root}/{split}
         mol_type = self.cfg.tokenizer.mol_token_type.upper()
-        return os.path.join(
+        legacy_path = os.path.join(
             "dataset", "Processed", mol_type,
             data_cfg.root, data_cfg.splits[split_name],
         )
+        if os.path.exists(legacy_path):
+            logger.warning(
+                f"Using legacy path: {legacy_path}. "
+                f"Consider regenerating dataset to new format: {new_path}"
+            )
+            return legacy_path
+
+        # 둘 다 없으면 새 경로 반환 (load_from_disk에서 에러 발생)
+        return new_path
 
     def setup(self, stage=None):
+        mol_token_type = self.cfg.tokenizer.mol_token_type
+
         if stage in ("fit", None):
-            self.train_dataset = MoleculeDataset(self._resolve_path("train"))
-            self.val_dataset = MoleculeDataset(self._resolve_path("val"))
+            self.train_dataset = MoleculeDataset(
+                self._resolve_path("train"), mol_token_type=mol_token_type,
+            )
+            self.val_dataset = MoleculeDataset(
+                self._resolve_path("val"), mol_token_type=mol_token_type,
+            )
             logger.info(f"Train: {len(self.train_dataset)} samples")
             logger.info(f"Val: {len(self.val_dataset)} samples")
 
         if stage in ("test", None):
-            self.test_dataset = MoleculeDataset(self._resolve_path("test"))
+            self.test_dataset = MoleculeDataset(
+                self._resolve_path("test"), mol_token_type=mol_token_type,
+            )
             logger.info(f"Test: {len(self.test_dataset)} samples")
 
     def train_dataloader(self):

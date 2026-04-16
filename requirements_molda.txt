@@ -166,10 +166,10 @@ timm==0.4.12
 tokenizers==0.15.2
 toml==0.10.2
 tomli==2.4.0
-torch==2.4.1+cu121
+# torch==2.4.1+cu121  # CUDA-specific build — reinstalled by setup_env.sh
 torch-geometric==2.7.0
 torchmetrics==1.9.0
-torchvision==0.19.1
+# torchvision==0.19.1  # reinstalled with torch
 tornado==6.5.5
 tqdm==4.67.3
 traitlets==5.14.3

@@ -397,36 +397,3 @@ class TestDDPReadiness:
         assert len(embed_keys) > 0, "No embedding keys in filtered checkpoint"
 
 
-# ─────────────────────────────────────────
-# Logging Integration
-# ─────────────────────────────────────────
-
-@pytest.mark.gpu
-@pytest.mark.slow
-@pytest.mark.integration
-class TestLoggingIntegration:
-
-    def test_sample_logger_with_real_probs(self, molda_model, tmp_path):
-        """ValidationSampleLogger가 실제 model output으로 정상 동작하는지 확인."""
-        molda_model.eval()
-        from src.loggers.sample_logger import ValidationSampleLogger
-
-        logger = ValidationSampleLogger(log_dir=str(tmp_path), samples_per_gpu=2)
-
-        tokenizer = molda_model.tokenizer
-        prompt = "<INSTRUCTION>Predict.</INSTRUCTION> mol"
-        prompt_ids = tokenizer.encode(prompt, add_special_tokens=False, return_tensors="pt").cuda()
-        prompt_mask = torch.ones_like(prompt_ids)
-
-        probs = molda_model.compute_binary_prob_likelihood(prompt_ids, prompt_mask)
-
-        logger.collect_classification("bbbp", probs[0].cpu(), "<BOOLEAN> True </BOOLEAN>")
-        logger.collect_generation("reaction", "<SELFIES>[C][O]</SELFIES>", "<SELFIES>[C][O]</SELFIES>")
-        logger.flush(epoch=0, global_step=0, rank=0)
-
-        log_file = tmp_path / "val_samples" / "epoch00_step0_rank0.txt"
-        assert log_file.exists()
-        content = log_file.read_text()
-        assert "[Classification]" in content
-        assert "[Generation]" in content
-        assert "bbbp" in content

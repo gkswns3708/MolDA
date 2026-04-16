@@ -103,6 +103,7 @@ class EvalCollator:
         tasks = []
         target_texts = []
         input_mol_strings = []
+        prompt_texts = []
 
         for sample in batch:
             prompt_text = sample["prompt_text"]
@@ -121,6 +122,7 @@ class EvalCollator:
             tasks.append(sample["task"])
             target_texts.append(sample["target_text"])
             input_mol_strings.append(sample.get("input_mol_string", ""))
+            prompt_texts.append(prompt_text)
 
         # Left-pad to max prompt length with PAD
         max_prompt_len = max(len(ids) for ids in prompt_ids_list)
@@ -139,4 +141,5 @@ class EvalCollator:
             "tasks": tasks,
             "target_texts": target_texts,
             "input_mol_strings": input_mol_strings,
+            "prompt_texts": prompt_texts,
         }

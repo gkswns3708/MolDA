@@ -42,8 +42,7 @@ class MolDATrainer(OptimizerMixin, ValidationMixin, CheckpointMixin, pl.Lightnin
         self._val_cls_fh = None
         self._val_gen_fh = None
 
-        # Sample / stepwise / train prediction loggers (log_dir 확보 후 setup()에서 초기화)
-        self._sample_logger = None
+        # Stepwise / train prediction loggers (log_dir 확보 후 setup()에서 초기화)
         self._stepwise_logger = None
         self._train_pred_logger = None
 

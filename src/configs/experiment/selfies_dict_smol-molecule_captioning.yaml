@@ -37,12 +37,14 @@ scheduler:
   warmup_steps: 100
 
 generation:
-  sampling_steps: 32
+  sampling_steps: 256
   remasking_strategy: [low_confidence]
   val_strategies: [random, semi_ar]
   semi_ar:
     enabled: false
     block_size: 32
+    steps_per_block: 32
+
 
 validation:
   check_val_every_n_epoch: 5
@@ -50,10 +52,10 @@ validation:
 wandb:
   enabled: true
   project: MolDA
-  run_name: selfies_dict_smol-mol_cap_highLR_s${stage}
-  tags: [selfies, dict, smol-molecule_captioning, highLR, reproduce-y8q73x0i]
-  group: selfies_dict_smol-mol_cap_highLR
+  run_name: selfies_dict_smol-molecule_captioning_256steps_s${stage}
+  tags: [selfies, dict, smol-molecule_captioning, 256steps, highLR, reproduce-y8q73x0i]
+  group: selfies_dict_smol-molecule_captioning_256steps
 
 logging:
-  dir: ./checkpoint/selfies_dict_smol-mol_cap_highLR/stage${stage}
+  dir: ./checkpoint/selfies_dict_smol-molecule_captioning_256steps_s${stage}
   weight_norm_layers: [wte, ff_out, lora]

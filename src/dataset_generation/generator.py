@@ -711,22 +711,65 @@ def get_dataset(task_name, raw_data_root, toy_n=None):
 # Prompt formatting & Arrow serialization
 # ---------------------------------------------------------------------------
 
-def _convert_smiles_tags_to_selfies(tagged_string):
+def _convert_smiles_tags_to_selfies(tagged_string, strict=False):
     """<SMILES>canonical_smiles</SMILES> → <SELFIES>selfies_string</SELFIES> 변환.
 
     <SMILES> 태그가 없는 문자열(예: <|bool|>, <|float|>)은 그대로 반환.
     <None> 값은 태그만 교체. reaction SMILES (>> 포함)도 처리.
+
+    Args:
+        strict: True이면 변환 실패 시 None 반환 (sample 제거용).
+                False이면 원본 SMILES를 fallback으로 사용 (기존 동작).
     """
+    _failed = False
+
     def _replace(match):
+        nonlocal _failed
         content = match.group(1).strip()
         if not content or content == "<None>":
             return "<SELFIES> " + content + " </SELFIES>"
         converted = convert_mol_representation(content, "selfies")
         if converted is None:
+            if strict:
+                _failed = True
+                return match.group(0)  # placeholder, will be discarded
             converted = content  # fallback
         return "<SELFIES> " + converted + " </SELFIES>"
 
-    return re.sub(r'<SMILES>\s*(.*?)\s*</SMILES>', _replace, tagged_string)
+    result = re.sub(r'<SMILES>\s*(.*?)\s*</SMILES>', _replace, tagged_string)
+    if strict and _failed:
+        return None
+    return result
+
+
+def _normalize_tag_spacing(text, tag):
+    """태그 spacing 정규화: <TAG> content </TAG> 형태로 통일."""
+    text = re.sub(rf"<{tag}>\s*", f"<{tag}> ", text)
+    text = re.sub(rf"\s*</{tag}>", f" </{tag}>", text)
+    return text
+
+
+def _build_formatted_prompt(input_prompt, system_prompt, llm_model_name):
+    """LLM 형식에 맞는 prompt를 생성."""
+    is_llada = "llada" in llm_model_name.lower() or "llama-3" in llm_model_name.lower()
+    if is_llada:
+        return (
+            "<|startoftext|>"
+            "<|start_header_id|>system<|end_header_id|>\n\n"
+            + system_prompt + "<|eot_id|>"
+            "<|start_header_id|>user<|end_header_id|>\n\n"
+            + input_prompt + "<|eot_id|>"
+            "<|start_header_id|>assistant<|end_header_id|>\n\n"
+        )
+    return "<s>[INST] " + system_prompt + " \n\n" + input_prompt + " [/INST] "
+
+
+def _build_formatted_target(label, llm_model_name):
+    """LLM 형식에 맞는 target을 생성."""
+    is_llada = "llada" in llm_model_name.lower() or "llama-3" in llm_model_name.lower()
+    if is_llada:
+        return label + "<|eot_id|>"
+    return label + " </s>"
 
 
 def prepare_data_instance(
@@ -735,46 +778,59 @@ def prepare_data_instance(
     llm_model_name="mistral",
     mol_token="<mol>",
     num_query_tokens=32,
-    mol_representation="smiles",
 ):
-    input_mol_string = data_instance["input_mol_string"]
-    label = data_instance["label"]
+    """데이터 인스턴스를 SMILES/SELFIES 양쪽 컬럼으로 변환.
 
-    # Step 3: SELFIES 변환 (canonical SMILES → SELFIES)
-    if mol_representation == "selfies":
-        input_mol_string = _convert_smiles_tags_to_selfies(input_mol_string)
-        label = _convert_smiles_tags_to_selfies(label)
+    SELFIES 변환 실패 시 None을 반환하여 해당 sample을 제거한다.
+    """
+    input_mol_string_smiles = data_instance["input_mol_string"]
+    label_smiles = data_instance["label"]
+
+    # SELFIES 변환 (strict=True: 실패 시 sample 제거)
+    input_mol_string_selfies = _convert_smiles_tags_to_selfies(
+        input_mol_string_smiles, strict=True
+    )
+    label_selfies = _convert_smiles_tags_to_selfies(label_smiles, strict=True)
+
+    if input_mol_string_selfies is None or label_selfies is None:
+        # SELFIES 변환 실패 → _selfies_valid=False 마킹, map 후 filter로 제거
+        return {
+            "task": data_instance.get("task_subtask_pair", ""),
+            "x": data_instance["x"],
+            "edge_index": data_instance["edge_index"],
+            "edge_attr": data_instance["edge_attr"],
+            "additional_x": data_instance["additional_x"],
+            "additional_edge_index": data_instance["additional_edge_index"],
+            "additional_edge_attr": data_instance["additional_edge_attr"],
+            "prompt_text_smiles": "",
+            "prompt_text_selfies": "",
+            "target_text_smiles": "",
+            "target_text_selfies": "",
+            "input_mol_string_smiles": "",
+            "input_mol_string_selfies": "",
+            "_selfies_valid": False,
+        }
 
     # 태그 spacing 정규화
-    if mol_representation == "selfies":
-        input_mol_string = re.sub(r"<SELFIES>\s*", "<SELFIES> ", input_mol_string)
-        input_mol_string = re.sub(r"\s*</SELFIES>", " </SELFIES>", input_mol_string)
-    else:
-        input_mol_string = re.sub(r"<SMILES>\s*", "<SMILES> ", input_mol_string)
-        input_mol_string = re.sub(r"\s*</SMILES>", " </SMILES>", input_mol_string)
+    input_mol_string_smiles = _normalize_tag_spacing(input_mol_string_smiles, "SMILES")
+    input_mol_string_selfies = _normalize_tag_spacing(input_mol_string_selfies, "SELFIES")
 
-    input_prompt = data_instance["instruction"]
-    if "<INPUT>" in input_prompt:
-        input_prompt = input_prompt.replace("<INPUT>", input_mol_string)
-
+    # Prompt 빌드 (SMILES / SELFIES 각각)
+    instruction = data_instance["instruction"]
     graph_sequence = "<GRAPH> " + mol_token * num_query_tokens + " </GRAPH>"
-    input_prompt += graph_sequence
 
-    is_llada = "llada" in llm_model_name.lower() or "llama-3" in llm_model_name.lower()
-    if is_llada:
-        formatted_prompt_text = (
-            "<|startoftext|>"
-            "<|start_header_id|>system<|end_header_id|>\n\n"
-            + system_prompt + "<|eot_id|>"
-            "<|start_header_id|>user<|end_header_id|>\n\n"
-            + input_prompt + "<|eot_id|>"
-            "<|start_header_id|>assistant<|end_header_id|>\n\n"
-        )
-        formatted_target_text = label + "<|eot_id|>"
-    else:
-        formatted_prompt_text = "<s>[INST] " + system_prompt + " \n\n" + input_prompt + " [/INST] "
-        formatted_target_text = label + " </s>"
+    prompt_smiles = instruction.replace("<INPUT>", input_mol_string_smiles) if "<INPUT>" in instruction else instruction
+    prompt_smiles += graph_sequence
 
+    prompt_selfies = instruction.replace("<INPUT>", input_mol_string_selfies) if "<INPUT>" in instruction else instruction
+    prompt_selfies += graph_sequence
+
+    formatted_prompt_smiles = _build_formatted_prompt(prompt_smiles, system_prompt, llm_model_name)
+    formatted_prompt_selfies = _build_formatted_prompt(prompt_selfies, system_prompt, llm_model_name)
+    formatted_target_smiles = _build_formatted_target(label_smiles, llm_model_name)
+    formatted_target_selfies = _build_formatted_target(label_selfies, llm_model_name)
+
+    # Task 이름 정규화
     raw_task = data_instance["task_subtask_pair"]
     if "qm9_additional_label" in raw_task:
         convert_dict = {
@@ -797,15 +853,22 @@ def prepare_data_instance(
 
     data = {
         "task": task,
+        # 그래프 데이터 (공통)
         "x": data_instance["x"],
         "edge_index": data_instance["edge_index"],
         "edge_attr": data_instance["edge_attr"],
         "additional_x": data_instance["additional_x"],
         "additional_edge_index": data_instance["additional_edge_index"],
         "additional_edge_attr": data_instance["additional_edge_attr"],
-        "prompt_text": formatted_prompt_text,
-        "target_text": formatted_target_text,
-        "input_mol_string": input_mol_string,
+        # 듀얼 컬럼
+        "prompt_text_smiles": formatted_prompt_smiles,
+        "prompt_text_selfies": formatted_prompt_selfies,
+        "target_text_smiles": formatted_target_smiles,
+        "target_text_selfies": formatted_target_selfies,
+        "input_mol_string_smiles": input_mol_string_smiles,
+        "input_mol_string_selfies": input_mol_string_selfies,
+        # SELFIES 변환 성공 여부 (map 후 filter에 사용)
+        "_selfies_valid": True,
     }
     return data
 

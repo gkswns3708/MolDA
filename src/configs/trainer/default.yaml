@@ -64,6 +64,7 @@ training:
   optimizer: adamw
   weight_decay: 0.1
   gradient_clip_val: 1.0
+  loss_normalization: global  # global | per_sample (global: Old_MolDA/SMDM 방식)
 
 # ─────────────────────────────────────────────
 # Scheduler (WarmupStableDecay)
@@ -136,8 +137,6 @@ logging:
   save_on_n_steps: 500      # N step마다 중간 checkpoint 저장
   save_top_k_checkpoints: -1
   save_every_n_epochs: 1       # validation 끝날 때마다 checkpoint 저장
-  # validation sample logging (GPU당 N개 저장)
-  val_log_samples_per_gpu: 1
   # step-wise denoising log (generation 과정 디버깅용)
   log_stepwise_denoising: false
   stepwise_max_samples: 8

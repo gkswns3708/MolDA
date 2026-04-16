@@ -2,6 +2,7 @@
 Task-specific evaluation metrics.
 
 Task categorization synced with benchmark_constants.py (all benchmarks covered).
+Calculation logic aligned with Old_MolDA/model/help_funcs.py.
 """
 
 import logging
@@ -113,6 +114,21 @@ def _parse_tag(text: str, tag: str) -> Optional[str]:
     return match.group(1).strip() if match else None
 
 
+def _parse_tag_with_fallback(text: str, tag: str) -> Optional[str]:
+    """Extract content between <TAG>...</TAG> with left-side fallback.
+
+    Tries dual-side pattern first (closed tag), then left-side (open-ended).
+    Matches Old_MolDA regex strategy.
+    """
+    dual = re.search(rf"(?<=<{tag}>).*?(?=</{tag}>)", text, re.DOTALL)
+    if dual:
+        return dual.group()
+    left = re.search(rf"(?<=<{tag}>).*", text, re.DOTALL)
+    if left:
+        return left.group()
+    return None
+
+
 def _parse_float_tag(text: str) -> Optional[float]:
     """Extract float from <FLOAT>...</FLOAT>."""
     content = _parse_tag(text, "FLOAT")
@@ -173,28 +189,41 @@ def classification_evaluate(probs: "torch.Tensor", label_texts: List[str],
             gt_labels.append(1 if parsed else 0)
             valid_indices.append(i)
 
+    failure_rate = 1.0 - len(valid_indices) / len(label_texts) if len(label_texts) > 0 else 0.0
+
     if not gt_labels:
-        return {"accuracy": 0.0, "f1": 0.0, "precision": 0.0, "recall": 0.0, "roc_auc": 0.0, "failure_rate": 1.0}
+        return {
+            "accuracy": float("nan"),
+            "f1": float("nan"),
+            "precision": float("nan"),
+            "recall": float("nan"),
+            "roc_auc": float("nan"),
+            "failure_rate": failure_rate,
+        }
 
     gt = np.array(gt_labels)
-    prob_true = probs[valid_indices, 1].cpu().numpy()
-    preds = (prob_true > 0.5).astype(int)
+    valid_probs = probs[valid_indices]
+    prob_true = valid_probs[:, 1].cpu().numpy()
+    preds = valid_probs.argmax(dim=-1).cpu().numpy()
 
-    results = {
-        "accuracy": float(accuracy_score(gt, preds)),
-        "f1": float(f1_score(gt, preds, zero_division=0)),
-        "precision": float(precision_score(gt, preds, zero_division=0)),
-        "recall": float(recall_score(gt, preds, zero_division=0)),
-        "failure_rate": 1.0 - len(valid_indices) / len(label_texts),
+    acc = float(accuracy_score(gt, preds))
+    f1 = float(f1_score(gt, preds))
+    prec = float(precision_score(gt, preds))
+    rec = float(recall_score(gt, preds))
+
+    try:
+        roc_auc = float(roc_auc_score(gt, prob_true))
+    except Exception:
+        roc_auc = float("nan")
+
+    return {
+        "accuracy": acc,
+        "f1": f1,
+        "precision": prec,
+        "recall": rec,
+        "roc_auc": roc_auc,
+        "failure_rate": failure_rate,
     }
-
-    # ROC AUC requires both classes present
-    if len(set(gt)) > 1:
-        results["roc_auc"] = float(roc_auc_score(gt, prob_true))
-    else:
-        results["roc_auc"] = 0.0
-
-    return results
 
 
 # ─────────────────────────────────────────────
@@ -205,147 +234,217 @@ def regression_evaluate(pred_texts: List[str], label_texts: List[str],
                         task: str) -> Dict[str, float]:
     """Evaluate regression by parsing <FLOAT> tags and computing MAE/RMSE.
 
-    Args:
-        pred_texts: model-generated strings
-        label_texts: ground truth strings
-
-    Returns:
-        dict with mae, rmse, failure_rate
+    Matches Old_MolDA regression_evaluate:
+    - Label parsing is expected to always succeed.
+    - Prediction must contain <|.|> token for proper magnitude.
     """
     preds, gts = [], []
-    for p, g in zip(pred_texts, label_texts):
-        pred_val = _parse_float_tag(p)
-        gt_val = _parse_float_tag(g)
-        if pred_val is not None and gt_val is not None:
+    failure_idxs = []
+
+    for i in range(len(pred_texts)):
+        # Label parsing (expected to always succeed for well-formed data)
+        label_content = re.search(r"(?<=<FLOAT>).*?(?=</FLOAT>)", label_texts[i])
+        if label_content is None:
+            failure_idxs.append(i)
+            continue
+        label_str = label_content.group().replace(" ", "")
+        label_str = label_str.replace("<|", "").replace("|>", "")
+        label_val = float(label_str)
+
+        # Prediction parsing with <|.|> validation
+        try:
+            assert (
+                "<|.|>" in pred_texts[i]
+            ), f"Prediction should include <|.|> token for proper magnitude of order"
+            pred_content = re.search(r"(?<=<FLOAT>).*?(?=</FLOAT>)", pred_texts[i])
+            assert pred_content is not None
+            pred_str = pred_content.group().replace(" ", "")
+            pred_str = pred_str.replace("<|", "").replace("|>", "")
+            pred_val = float(pred_str)
+
+            gts.append(label_val)
             preds.append(pred_val)
-            gts.append(gt_val)
+        except Exception:
+            failure_idxs.append(i)
 
     n_total = len(pred_texts)
     n_valid = len(preds)
 
     if n_valid == 0:
-        return {"mae": float("inf"), "mse": float("inf"), "rmse": float("inf"), "failure_rate": 1.0}
+        return {"mae": float("inf"), "mse": float("inf"), "rmse": float("inf"),
+                "failure_rate": len(failure_idxs) / n_total if n_total > 0 else 0.0}
 
     preds = np.array(preds)
     gts = np.array(gts)
-    errors = np.abs(preds - gts)
+
+    mae = float(np.mean(np.abs(gts - preds)))
+    mse = float(np.mean((gts - preds) ** 2))
+    rmse = float(np.mean((gts - preds) ** 2) ** 0.5)
 
     return {
-        "mae": float(errors.mean()),
-        "mse": float((errors ** 2).mean()),
-        "rmse": float(np.sqrt((errors ** 2).mean())),
-        "failure_rate": 1.0 - n_valid / n_total,
+        "mae": mae,
+        "mse": mse,
+        "rmse": rmse,
+        "failure_rate": len(failure_idxs) / n_total if n_total > 0 else 0.0,
     }
 
 
 # ─────────────────────────────────────────────
-# Molecule: generation + SELFIES parse
+# Molecule: generation + SELFIES/SMILES parse
 # ─────────────────────────────────────────────
 
 def molecule_evaluate(pred_texts: List[str], label_texts: List[str],
                       task: str, tokenizer=None) -> Dict[str, float]:
     """Evaluate molecule generation (reaction, text2mol) by parsing SELFIES or SMILES.
 
-    Auto-detects tag format: tries <SELFIES> first, falls back to <SMILES>.
+    Auto-detects tag format per sample:
+    - <SELFIES> tag → SELFIES mode (sf.decoder → SMILES → RDKit)
+    - <SMILES> tag → SMILES mode (direct RDKit processing, no selfies dependency)
 
-    Args:
-        pred_texts: model-generated strings containing <SELFIES>...</SELFIES> or <SMILES>...</SMILES>
-        label_texts: ground truth strings
-        tokenizer: HF tokenizer for BLEU tokenization (bleu_smiles, bleu_selfies)
-
-    Returns:
-        dict with validity_ratio, exact_match_ratio, fingerprint similarities,
-        bleu_smiles, bleu_selfies, levenshtein_score, failure_rate
+    Calculation logic matches Old_MolDA molecule_evaluate:
+    - Spaces removed before parsing.
+    - Dual-side + left-side fallback regex.
+    - Residual tag cleanup on predictions.
+    - Exact match via InChI comparison.
+    - Levenshtein: raw edit distance on canonical SMILES.
+    - Validity = 1 - failure_count / total_count.
+    - BLEU always computed with tokenizer.
     """
     try:
-        import selfies as sf
         from rdkit import Chem
         from rdkit.Chem import MACCSkeys, AllChem, DataStructs
+        from rdkit.Chem.inchi import MolToInchi
     except ImportError:
-        logger.warning("selfies/rdkit not installed, returning empty metrics")
+        logger.warning("rdkit not installed, returning empty metrics")
         return {"validity_ratio": 0.0, "exact_match_ratio": 0.0,
-                "maccs_fts": 0.0, "rdk_fts": 0.0, "morgan_fts": 0.0,
+                "MACCS_FTS": 0.0, "RDK_FTS": 0.0, "morgan_FTS": 0.0,
                 "bleu_smiles": 0.0, "bleu_selfies": 0.0,
                 "levenshtein_score": 0.0, "failure_rate": 1.0}
 
+    sf = None
+    try:
+        import selfies as sf
+    except ImportError:
+        pass  # SMILES 모드에서는 selfies 없어도 동작
+
+    try:
+        from Levenshtein import distance as lev_distance
+    except ImportError:
+        lev_distance = None
+
     n_total = len(pred_texts)
-    n_valid_smiles = 0
-    n_exact_match = 0
-    n_parsed = 0
-    levenshtein_scores = []
-    maccs_scores = []
-    rdk_scores = []
-    morgan_scores = []
-    # For BLEU: tokenized canonical SMILES/SELFIES pairs
-    ref_smiles_list, pred_smiles_list = [], []
+    failure_idxs = []
+    exact_matches = []
+    levs = []
+    MACCS_sims = []
+    RDK_sims = []
+    morgan_sims = []
     ref_selfies_list, pred_selfies_list = [], []
+    ref_smiles_list, pred_smiles_list = [], []
 
-    for pred, gt in zip(pred_texts, label_texts):
-        # Auto-detect: SELFIES 태그 먼저 시도, 없으면 SMILES 태그
-        pred_selfies = _parse_tag(pred, "SELFIES")
-        gt_selfies = _parse_tag(gt, "SELFIES")
-        use_selfies = pred_selfies is not None and gt_selfies is not None
+    for i in range(n_total):
+        target = label_texts[i].replace(" ", "")
+        prediction = pred_texts[i].replace(" ", "")
 
-        if use_selfies:
-            # SELFIES → SMILES 변환
-            try:
-                pred_smiles = sf.decoder(pred_selfies)
-                gt_smiles = sf.decoder(gt_selfies)
-            except Exception:
-                continue
-        else:
-            # SMILES 태그 직접 파싱
-            pred_smiles = _parse_tag(pred, "SMILES")
-            gt_smiles = _parse_tag(gt, "SMILES")
-            if pred_smiles is None or gt_smiles is None:
-                continue
+        prediction_mol = None
+        use_selfies = False
+        target_canonical_selfies = None
+        prediction_canonical_selfies = None
 
-        n_parsed += 1
+        try:
+            # Auto-detect: SELFIES 태그 먼저 시도, 없으면 SMILES 태그
+            target_selfies_raw = _parse_tag_with_fallback(target, "SELFIES")
 
-        # Validity
-        pred_mol = Chem.MolFromSmiles(pred_smiles)
-        gt_mol = Chem.MolFromSmiles(gt_smiles)
-        if pred_mol is not None:
-            n_valid_smiles += 1
-            pred_canonical = Chem.MolToSmiles(pred_mol)
-            if gt_mol is not None:
-                gt_canonical = Chem.MolToSmiles(gt_mol)
-                if pred_canonical == gt_canonical:
-                    n_exact_match += 1
+            if target_selfies_raw is not None:
+                # === SELFIES 모드 ===
+                use_selfies = True
+                assert sf is not None, "selfies package required for SELFIES mode"
+                target_smiles = sf.decoder(target_selfies_raw)
+                target_mol = Chem.MolFromSmiles(target_smiles)
+                target_canonical_smiles = Chem.CanonSmiles(target_smiles)
+                target_canonical_selfies = sf.encoder(target_canonical_smiles)
 
-                # BLEU tokenization (only when both are valid + canonical)
-                if tokenizer is not None:
-                    pred_smiles_list.append(tokenizer.tokenize(pred_canonical))
-                    ref_smiles_list.append([tokenizer.tokenize(gt_canonical)])
-                    if use_selfies:
-                        pred_canonical_selfies = sf.encoder(pred_canonical)
-                        gt_canonical_selfies = sf.encoder(gt_canonical)
-                        pred_selfies_list.append(tokenizer.tokenize(pred_canonical_selfies))
-                        ref_selfies_list.append([tokenizer.tokenize(gt_canonical_selfies)])
+                # Parse prediction SELFIES
+                prediction_selfies = _parse_tag_with_fallback(prediction, "SELFIES")
+                assert prediction_selfies is not None, "Prediction SELFIES tag not found"
 
-        # Fingerprint Tanimoto Similarities
-        if pred_mol is not None and gt_mol is not None:
-            try:
-                # MACCS
-                fp_pred = MACCSkeys.GenMACCSKeys(pred_mol)
-                fp_gt = MACCSkeys.GenMACCSKeys(gt_mol)
-                maccs_scores.append(DataStructs.TanimotoSimilarity(fp_pred, fp_gt))
-                # RDK
-                rdk_pred = Chem.RDKFingerprint(pred_mol)
-                rdk_gt = Chem.RDKFingerprint(gt_mol)
-                rdk_scores.append(DataStructs.TanimotoSimilarity(rdk_pred, rdk_gt))
-                # Morgan (radius=2)
-                morgan_pred = AllChem.GetMorganFingerprint(pred_mol, 2)
-                morgan_gt = AllChem.GetMorganFingerprint(gt_mol, 2)
-                morgan_scores.append(DataStructs.TanimotoSimilarity(morgan_pred, morgan_gt))
-            except Exception:
-                pass
+                # Cleanup residual tags
+                prediction_selfies = prediction_selfies.split("<SELFIES>")[-1]
+                prediction_selfies = prediction_selfies.split("</SELFIES>")[0]
+                assert (
+                    "<SELFIES>" not in prediction_selfies
+                    and "</SELFIES>" not in prediction_selfies
+                )
 
-        # Levenshtein on canonical SMILES
-        if pred_smiles and gt_smiles:
-            lev = _levenshtein_distance(pred_smiles, gt_smiles)
-            max_len = max(len(pred_smiles), len(gt_smiles))
-            levenshtein_scores.append(1.0 - lev / max_len if max_len > 0 else 1.0)
+                prediction_smiles = sf.decoder(prediction_selfies)
+                prediction_mol = Chem.MolFromSmiles(prediction_smiles)
+                prediction_canonical_smiles = Chem.CanonSmiles(prediction_smiles)
+                prediction_canonical_selfies = sf.encoder(prediction_canonical_smiles)
+            else:
+                # === SMILES 모드 ===
+                target_smiles_raw = _parse_tag_with_fallback(target, "SMILES")
+                assert target_smiles_raw is not None, "No SELFIES or SMILES tag found in target"
+
+                # Cleanup residual tags (prediction)
+                target_smiles = target_smiles_raw.split("<SMILES>")[-1].split("</SMILES>")[0]
+                target_mol = Chem.MolFromSmiles(target_smiles)
+                target_canonical_smiles = Chem.CanonSmiles(target_smiles)
+
+                prediction_smiles_raw = _parse_tag_with_fallback(prediction, "SMILES")
+                assert prediction_smiles_raw is not None, "Prediction SMILES tag not found"
+
+                prediction_smiles = prediction_smiles_raw.split("<SMILES>")[-1].split("</SMILES>")[0]
+                prediction_mol = Chem.MolFromSmiles(prediction_smiles)
+                prediction_canonical_smiles = Chem.CanonSmiles(prediction_smiles)
+
+            # Exact match via InChI (공통)
+            exact_matches.append(
+                MolToInchi(target_mol) == MolToInchi(prediction_mol)
+            )
+        except Exception:
+            failure_idxs.append(i)
+            prediction_mol = None
+
+        if prediction_mol is not None:
+            # Levenshtein on canonical SMILES (raw distance)
+            if lev_distance is not None:
+                levs.append(lev_distance(target_canonical_smiles, prediction_canonical_smiles))
+            else:
+                levs.append(_levenshtein_distance(target_canonical_smiles, prediction_canonical_smiles))
+
+            # BLEU tokenization (always when tokenizer provided)
+            if tokenizer is not None:
+                pred_smiles_list.append(tokenizer.tokenize(prediction_canonical_smiles))
+                ref_smiles_list.append([tokenizer.tokenize(target_canonical_smiles)])
+                # SELFIES BLEU: SELFIES 모드에서만 계산
+                if use_selfies and target_canonical_selfies and prediction_canonical_selfies:
+                    pred_selfies_list.append(tokenizer.tokenize(prediction_canonical_selfies))
+                    ref_selfies_list.append([tokenizer.tokenize(target_canonical_selfies)])
+
+            # Fingerprint Tanimoto Similarities
+            MACCS_sims.append(
+                DataStructs.FingerprintSimilarity(
+                    MACCSkeys.GenMACCSKeys(target_mol),
+                    MACCSkeys.GenMACCSKeys(prediction_mol),
+                    metric=DataStructs.TanimotoSimilarity,
+                )
+            )
+            RDK_sims.append(
+                DataStructs.FingerprintSimilarity(
+                    Chem.RDKFingerprint(target_mol),
+                    Chem.RDKFingerprint(prediction_mol),
+                    metric=DataStructs.TanimotoSimilarity,
+                )
+            )
+            morgan_sims.append(
+                DataStructs.TanimotoSimilarity(
+                    AllChem.GetMorganFingerprint(target_mol, 2),
+                    AllChem.GetMorganFingerprint(prediction_mol, 2),
+                )
+            )
+
+    # Validity = 1 - failure_count / total (matches Old_MolDA)
+    validity_ratio = 1 - len(failure_idxs) / n_total if n_total > 0 else 0.0
 
     # BLEU scores
     bleu_smiles, bleu_selfies = 0.0, 0.0
@@ -356,6 +455,11 @@ def molecule_evaluate(pred_texts: List[str], label_texts: List[str],
                 ref_smiles_list, pred_smiles_list,
                 weights=(0.25, 0.25, 0.25, 0.25),
             ) * 100
+        except ImportError:
+            pass
+    if pred_selfies_list:
+        try:
+            from nltk.translate.bleu_score import corpus_bleu
             bleu_selfies = corpus_bleu(
                 ref_selfies_list, pred_selfies_list,
                 weights=(0.25, 0.25, 0.25, 0.25),
@@ -364,19 +468,20 @@ def molecule_evaluate(pred_texts: List[str], label_texts: List[str],
             pass
 
     return {
-        "validity_ratio": n_valid_smiles / n_parsed if n_parsed > 0 else 0.0,
-        "exact_match_ratio": n_exact_match / n_parsed if n_parsed > 0 else 0.0,
-        "levenshtein_score": float(np.mean(levenshtein_scores)) if levenshtein_scores else 0.0,
-        "maccs_fts": float(np.mean(maccs_scores)) if maccs_scores else 0.0,
-        "rdk_fts": float(np.mean(rdk_scores)) if rdk_scores else 0.0,
-        "morgan_fts": float(np.mean(morgan_scores)) if morgan_scores else 0.0,
+        "validity_ratio": validity_ratio,
+        "MACCS_FTS": float(np.mean(MACCS_sims)) if MACCS_sims else 0.0,
+        "RDK_FTS": float(np.mean(RDK_sims)) if RDK_sims else 0.0,
+        "morgan_FTS": float(np.mean(morgan_sims)) if morgan_sims else 0.0,
+        "exact_match_ratio": float(np.mean(exact_matches)) if exact_matches else 0.0,
+        "levenshtein_score": float(np.mean(levs)) if levs else 0.0,
         "bleu_smiles": float(bleu_smiles),
         "bleu_selfies": float(bleu_selfies),
-        "failure_rate": 1.0 - n_parsed / n_total if n_total > 0 else 1.0,
+        "failure_rate": len(failure_idxs) / n_total if n_total > 0 else 0.0,
     }
 
 
 def _levenshtein_distance(s1: str, s2: str) -> int:
+    """Fallback Levenshtein distance (when python-Levenshtein not installed)."""
     if len(s1) < len(s2):
         return _levenshtein_distance(s2, s1)
     if len(s2) == 0:
@@ -398,85 +503,193 @@ def _levenshtein_distance(s1: str, s2: str) -> int:
 # ─────────────────────────────────────────────
 
 def caption_evaluate(pred_texts: List[str], label_texts: List[str],
-                     task: str) -> Dict[str, float]:
-    """Evaluate text generation (mol2text, captioning) with BLEU/ROUGE.
+                     task: str, tokenizer=None,
+                     meteor_tokenizers: Optional[List[str]] = None) -> Dict[str, float]:
+    """Evaluate text generation (mol2text, captioning) with BLEU/ROUGE/METEOR.
+
+    Matches Old_MolDA caption_evaluate:
+    - Auto-detects tag type from target content.
+    - Dual-side + left-side fallback regex.
+    - BLEU: word_tokenize(lower) or tokenizer, no smoothing, ×100.
+    - METEOR: word_tokenize(lower) for wordnet, tokenizer for llada, ×100.
+    - ROUGE: no stemmer, score(hyp, ref) order, ×100.
 
     Args:
         pred_texts: model-generated strings
         label_texts: ground truth strings
-
-    Returns:
-        dict with bleu2, bleu4, rouge1, rougeL, failure_rate
+        task: task name
+        tokenizer: HF tokenizer for LLaDA-mode METEOR/BLEU
+        meteor_tokenizers: list of ["wordnet", "llada"] (default: ["wordnet", "llada"])
     """
-    # Determine tag type based on task
-    if "mol2text" in task or "captioning" in task:
-        tag = "DESCRIPTION"
-    elif "i2f" in task or "s2f" in task:
-        tag = "MOLFORMULA"
-    elif "s2i" in task or "i2s" in task:
-        tag = "IUPAC"
+    if meteor_tokenizers is None:
+        meteor_tokenizers = ["wordnet", "llada"]
+
+    use_wordnet = "wordnet" in meteor_tokenizers
+    use_llada = "llada" in meteor_tokenizers
+
+    # Compiled regex patterns for tag auto-detection (matches Old_MolDA)
+    patterns = {
+        "DESCRIPTION": {
+            "dual_side": re.compile(r"(?<=<DESCRIPTION>).*?(?=</DESCRIPTION>)"),
+            "left_side": re.compile(r"(?<=<DESCRIPTION>).*"),
+        },
+        "IUPAC": {
+            "dual_side": re.compile(r"(?<=<IUPAC>).*?(?=</IUPAC>)"),
+            "left_side": re.compile(r"(?<=<IUPAC>).*"),
+        },
+        "MOLFORMULA": {
+            "dual_side": re.compile(r"(?<=<MOLFORMULA>).*?(?=</MOLFORMULA>)"),
+            "left_side": re.compile(r"(?<=<MOLFORMULA>).*"),
+        },
+    }
+
+    # Tokenization lists
+    references_wordnet, hypotheses_wordnet = [], []
+    references_llada, hypotheses_llada = [], []
+    ref_sentences, hyp_sentences = [], []
+    failure_idxs = []
+
+    for i in range(len(label_texts)):
+        target = label_texts[i]
+        prediction = pred_texts[i]
+
+        # Auto-detect tag from target content (matches Old_MolDA)
+        pattern = None
+        for key, matching_pattern in patterns.items():
+            if matching_pattern["left_side"].search(target):
+                pattern = matching_pattern
+                break
+        if pattern is None:
+            continue
+
+        # Parse reference
+        if pattern["dual_side"].search(target):
+            ref = pattern["dual_side"].search(target).group()
+        else:
+            ref = pattern["left_side"].search(target).group()
+        ref_sentences.append(ref)
+
+        # Tokenize reference
+        if use_wordnet:
+            try:
+                from nltk.tokenize import word_tokenize
+                ref_tokens_wordnet = word_tokenize(ref.lower())
+            except ImportError:
+                ref_tokens_wordnet = ref.lower().split()
+        if use_llada and tokenizer is not None:
+            ref_tokens_llada = tokenizer.tokenize(ref)
+
+        # Parse prediction
+        try:
+            if pattern["dual_side"].search(prediction):
+                pred = pattern["dual_side"].search(prediction).group()
+            else:
+                pred = pattern["left_side"].search(prediction).group()
+            hyp_sentences.append(pred)
+
+            # Tokenize prediction
+            if use_wordnet:
+                try:
+                    from nltk.tokenize import word_tokenize
+                    pred_tokens_wordnet = word_tokenize(pred.lower())
+                except ImportError:
+                    pred_tokens_wordnet = pred.lower().split()
+                references_wordnet.append([ref_tokens_wordnet])
+                hypotheses_wordnet.append(pred_tokens_wordnet)
+            if use_llada and tokenizer is not None:
+                pred_tokens_llada = tokenizer.tokenize(pred)
+                references_llada.append([ref_tokens_llada])
+                hypotheses_llada.append(pred_tokens_llada)
+        except Exception:
+            failure_idxs.append(i)
+
+    has_valid_samples = len(hyp_sentences) > 0
+
+    if has_valid_samples:
+        # BLEU: word_tokenize(lower) based, no smoothing, ×100 (matches Old_MolDA)
+        try:
+            from nltk.translate.bleu_score import corpus_bleu
+            if use_wordnet and references_wordnet:
+                bleu2 = corpus_bleu(references_wordnet, hypotheses_wordnet, weights=(0.5, 0.5)) * 100
+                bleu4 = corpus_bleu(references_wordnet, hypotheses_wordnet, weights=(0.25, 0.25, 0.25, 0.25)) * 100
+            elif references_llada:
+                bleu2 = corpus_bleu(references_llada, hypotheses_llada, weights=(0.5, 0.5)) * 100
+                bleu4 = corpus_bleu(references_llada, hypotheses_llada, weights=(0.25, 0.25, 0.25, 0.25)) * 100
+            else:
+                bleu2, bleu4 = 0.0, 0.0
+        except ImportError:
+            bleu2, bleu4 = 0.0, 0.0
+
+        # METEOR - WordNet mode (word_tokenize, lowercase, ×100)
+        meteor_score_wordnet = 0.0
+        if use_wordnet and references_wordnet:
+            try:
+                from nltk.translate.meteor_score import meteor_score as nltk_meteor
+                meteor_scores_wn = []
+                for ref, hyp in zip(references_wordnet, hypotheses_wordnet):
+                    meteor_scores_wn.append(nltk_meteor(ref, hyp))
+                meteor_score_wordnet = float(np.mean(meteor_scores_wn)) * 100
+            except ImportError:
+                pass
+
+        # METEOR - LLaDA mode (model tokenizer, ×100)
+        meteor_score_llada = 0.0
+        if use_llada and references_llada:
+            try:
+                from nltk.translate.meteor_score import meteor_score as nltk_meteor
+                meteor_scores_ll = []
+                for ref, hyp in zip(references_llada, hypotheses_llada):
+                    meteor_scores_ll.append(nltk_meteor(ref, hyp))
+                meteor_score_llada = float(np.mean(meteor_scores_ll)) * 100
+            except ImportError:
+                pass
+
+        # ROUGE: no stemmer, score(hyp, ref) order, ×100 (matches Old_MolDA)
+        try:
+            from rouge_score import rouge_scorer
+            scorer = rouge_scorer.RougeScorer(["rouge1", "rouge2", "rougeL"])
+            rouge_scores = []
+            for hyp_sen, ref_sen in zip(hyp_sentences, ref_sentences):
+                lscore = scorer.score(hyp_sen, ref_sen)
+                rouge_scores.append(lscore)
+            rouge1 = float(np.mean([rs["rouge1"].fmeasure for rs in rouge_scores])) * 100
+            rouge2 = float(np.mean([rs["rouge2"].fmeasure for rs in rouge_scores])) * 100
+            rougeL = float(np.mean([rs["rougeL"].fmeasure for rs in rouge_scores])) * 100
+        except ImportError:
+            rouge1, rouge2, rougeL = 0.0, 0.0, 0.0
     else:
-        tag = "DESCRIPTION"
-
-    preds_parsed, gts_parsed = [], []
-    for pred, gt in zip(pred_texts, label_texts):
-        p = _parse_tag(pred, tag)
-        g = _parse_tag(gt, tag)
-        if p is not None and g is not None:
-            preds_parsed.append(p)
-            gts_parsed.append(g)
-
-    n_total = len(pred_texts)
-    n_valid = len(preds_parsed)
-
-    if n_valid == 0:
-        return {"bleu2": 0.0, "bleu4": 0.0, "meteor": 0.0, "rouge1": 0.0, "rouge2": 0.0, "rougeL": 0.0, "failure_rate": 1.0}
-
-    # BLEU
-    try:
-        from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
-        smooth = SmoothingFunction().method1
-        refs = [[g.split()] for g in gts_parsed]
-        hyps = [p.split() for p in preds_parsed]
-        bleu2 = corpus_bleu(refs, hyps, weights=(0.5, 0.5), smoothing_function=smooth)
-        bleu4 = corpus_bleu(refs, hyps, weights=(0.25, 0.25, 0.25, 0.25), smoothing_function=smooth)
-    except ImportError:
         bleu2, bleu4 = 0.0, 0.0
-
-    # METEOR
-    try:
-        from nltk.translate.meteor_score import meteor_score as nltk_meteor
-        meteor_scores = [nltk_meteor([g.split()], p.split())
-                         for p, g in zip(preds_parsed, gts_parsed)]
-        meteor = float(np.mean(meteor_scores))
-    except ImportError:
-        meteor = 0.0
-
-    # ROUGE
-    try:
-        from rouge_score import rouge_scorer
-        scorer = rouge_scorer.RougeScorer(["rouge1", "rouge2", "rougeL"], use_stemmer=True)
-        r1_scores, r2_scores, rl_scores = [], [], []
-        for p, g in zip(preds_parsed, gts_parsed):
-            scores = scorer.score(g, p)
-            r1_scores.append(scores["rouge1"].fmeasure)
-            r2_scores.append(scores["rouge2"].fmeasure)
-            rl_scores.append(scores["rougeL"].fmeasure)
-        rouge1 = float(np.mean(r1_scores))
-        rouge2 = float(np.mean(r2_scores))
-        rougeL = float(np.mean(rl_scores))
-    except ImportError:
+        meteor_score_wordnet = 0.0
+        meteor_score_llada = 0.0
         rouge1, rouge2, rougeL = 0.0, 0.0, 0.0
 
-    return {
-        "bleu2": float(bleu2),
-        "bleu4": float(bleu4),
-        "meteor": meteor,
+    failure_rate = len(failure_idxs) / len(pred_texts) if len(pred_texts) > 0 else 0.0
+
+    # Build results (matches Old_MolDA key structure)
+    results = {
+        "bleu2": bleu2,
+        "bleu4": bleu4,
         "rouge1": rouge1,
         "rouge2": rouge2,
         "rougeL": rougeL,
-        "failure_rate": 1.0 - n_valid / n_total,
+        "failure_rate": failure_rate,
     }
+
+    # Add METEOR keys based on selected options
+    if use_wordnet:
+        results["meteor_wordnet"] = meteor_score_wordnet
+    if use_llada:
+        results["meteor_llada"] = meteor_score_llada
+
+    # Backward-compatible "meteor" key (WordNet priority, then LLaDA)
+    if use_wordnet:
+        results["meteor"] = meteor_score_wordnet
+    elif use_llada:
+        results["meteor"] = meteor_score_llada
+    else:
+        results["meteor"] = 0.0
+
+    return results
 
 
 # ─────────────────────────────────────────────

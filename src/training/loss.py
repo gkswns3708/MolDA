@@ -26,11 +26,12 @@ class MaskedDiffusionLoss(nn.Module):
 
     def __init__(self, mask_token_id: int = MASK_TOKEN_ID, eps: float = EPS,
                  log_nan: bool = True, nan_log_dir: str = "./nan_logs",
-                 eos_token_id: int = None):
+                 eos_token_id: int = None, normalization: str = "global"):
         super().__init__()
         self.mask_token_id = mask_token_id
         self.eos_token_id = eos_token_id
         self.eps = eps
+        self.normalization = normalization  # "global" | "per_sample"
         self.log_nan = log_nan
         self.nan_log_dir = nan_log_dir
 
@@ -105,10 +106,16 @@ class MaskedDiffusionLoss(nn.Module):
         p_mask_expanded = p_mask.expand(b, l)  # [B, 1] → [B, L]
         token_loss = token_loss / p_mask_expanded[mask_indices]
 
-        # Per-sample normalization: / answer_length
-        ce_loss = torch.sum(
-            token_loss / answer_lengths_expanded[mask_indices]
-        ) / b
+        # Loss normalization
+        if self.normalization == "global":
+            # Old_MolDA/SMDM 방식: 배치 전체 answer 토큰 수로 나눔
+            total_answer_length = answer_lengths.sum()
+            ce_loss = token_loss.sum() / (total_answer_length + 1e-8)
+        else:
+            # Per-sample: 각 샘플 answer_length로 나눈 뒤 배치 평균
+            ce_loss = torch.sum(
+                token_loss / answer_lengths_expanded[mask_indices]
+            ) / b
 
         # NaN guard
         if ce_loss.isnan() and self.log_nan:

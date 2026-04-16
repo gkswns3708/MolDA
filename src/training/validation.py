@@ -21,7 +21,6 @@ from src.training.metrics import (
     get_task_type, classification_evaluate,
     regression_evaluate, molecule_evaluate, caption_evaluate,
 )
-from src.loggers.sample_logger import ValidationSampleLogger
 from src.loggers.stepwise_logger import StepwiseLogger
 from src.loggers.train_prediction_logger import TrainPredictionLogger
 
@@ -162,16 +161,12 @@ class ValidationMixin:
 
     def setup(self, stage=None):
         """Trainer 연결 후 log_dir 기반으로 sample/stepwise logger 초기화."""
-        if self._sample_logger is not None:
+        if self._stepwise_logger is not None:
             return  # 이미 초기화됨
 
         # lightning_logs/version_N/ 경로 확보
         log_dir = self.trainer.log_dir or "."
 
-        self._sample_logger = ValidationSampleLogger(
-            log_dir=log_dir,
-            samples_per_gpu=self.cfg.logging.get("val_log_samples_per_gpu", 1),
-        )
         self._stepwise_logger = StepwiseLogger(
             log_dir=log_dir,
             max_samples=self.cfg.logging.get("stepwise_max_samples", 8),
@@ -186,11 +181,30 @@ class ValidationMixin:
         logger.info(f"Loggers initialized: log_dir={log_dir}")
 
     def on_validation_epoch_start(self):
+        # Generation steps 일관성 검증 (첫 validation epoch에서 1회)
+        # generate.py 실제 로직: num_blocks = gen_length // block_size
+        #                        steps_per_block = steps // num_blocks
+        # → steps가 num_blocks로 나누어 떨어져야 함
+        gen_cfg = self.cfg.generation
+        if "semi_ar" in gen_cfg.val_strategies:
+            gen_len = self.cfg.data.gen_max_len
+            block_size = gen_cfg.semi_ar.block_size
+            num_blocks = gen_len // block_size
+            if num_blocks == 0:
+                raise ValueError(
+                    f"semi_ar block_size({block_size}) > gen_max_len({gen_len})"
+                )
+            if gen_cfg.sampling_steps % num_blocks != 0:
+                raise ValueError(
+                    f"Generation steps 불일치: "
+                    f"sampling_steps({gen_cfg.sampling_steps})는 "
+                    f"num_blocks(gen_max_len={gen_len} // block_size={block_size} = {num_blocks})로 "
+                    f"나누어 떨어져야 합니다."
+                )
+
         # Open per-rank JSONL files for this epoch
         self._val_cls_fh = self._open_val_jsonl("cls")
         self._val_gen_fh = self._open_val_jsonl("gen")
-        if self._sample_logger:
-            self._sample_logger.reset()
         if self._stepwise_logger:
             self._stepwise_logger.reset()
 
@@ -200,6 +214,8 @@ class ValidationMixin:
         prompt_ids = batch["prompt_input_ids"]
         prompt_mask = batch["prompt_attention_mask"]
         target_texts = batch["target_texts"]
+        input_mol_strings = batch.get("input_mol_strings", [""] * len(tasks))
+        prompt_texts = batch.get("prompt_texts", [""] * len(tasks))
 
         # Split by task type
         cls_idx = [i for i, t in enumerate(tasks) if t in CLASSIFICATION_TASKS]
@@ -222,14 +238,9 @@ class ValidationMixin:
                     "task": tasks[ci],
                     "probs": probs_cpu[i].tolist(),
                     "label": target_texts[ci],
+                    "input_mol_string": input_mol_strings[ci],
+                    "prompt_text": prompt_texts[ci],
                 })
-
-            # Sample 수집 (GPU당 N개 제한)
-            if self._sample_logger:
-                for i, ci in enumerate(cls_idx):
-                    self._sample_logger.collect_classification(
-                        tasks[ci], probs[i].cpu(), target_texts[ci],
-                    )
 
         # --- Generation: diffusion sampling (remasking × sampling 전략 조합) ---
         if gen_idx:
@@ -298,15 +309,9 @@ class ValidationMixin:
                         "strategy": strategy_key,
                         "pred_text": pred_texts[i],
                         "label_text": gen_labels[i],
+                        "input_mol_string": input_mol_strings[gen_idx[i]],
+                        "prompt_text": prompt_texts[gen_idx[i]],
                     })
-
-                # Sample 수집 (GPU당 N개 제한, strategy 포함)
-                if self._sample_logger:
-                    for i, gi in enumerate(gen_idx):
-                        self._sample_logger.collect_generation(
-                            tasks[gi], pred_texts[i], target_texts[gi],
-                            strategy=strategy_key,
-                        )
 
     def on_validation_epoch_end(self):
         print(f"[Rank {self.global_rank}] epoch_end: START", flush=True)
@@ -320,15 +325,7 @@ class ValidationMixin:
             self._val_gen_fh = None
         print(f"[Rank {self.global_rank}] epoch_end: files closed", flush=True)
 
-        # ── 2. Sample logging (모든 rank) ──
-        if self._sample_logger:
-            self._sample_logger.flush(
-                self.current_epoch, self.global_step,
-                rank=self.global_rank,
-            )
-        print(f"[Rank {self.global_rank}] epoch_end: sample_logger done", flush=True)
-
-        # ── 3. Rank 0: 비동기 스레드로 metric 계산 시작 ──
+        # ── 2. Rank 0: 비동기 스레드로 metric 계산 시작 ──
         # 주의: self.trainer.log_dir은 내부적으로 broadcast()를 호출하므로
         # if 블록 바깥에서 모든 rank가 함께 호출해야 함
         val_epoch = self.current_epoch
@@ -339,13 +336,11 @@ class ValidationMixin:
         if self.global_rank == 0:
             import threading
             loggers = list(self.loggers)
-            sample_logger = self._sample_logger
             tokenizer = self.tokenizer
             print(f"[Rank 0] epoch_end: launching async thread", flush=True)
             t = threading.Thread(
                 target=self._process_validation_async,
-                args=(val_epoch, val_step, log_dir, world_size, loggers,
-                      sample_logger, tokenizer),
+                args=(val_epoch, val_step, log_dir, world_size, loggers, tokenizer),
                 daemon=True,
             )
             t.start()
@@ -354,7 +349,7 @@ class ValidationMixin:
         print(f"[Rank {self.global_rank}] epoch_end: RETURN", flush=True)
 
     def _process_validation_async(self, epoch, step, log_dir, world_size,
-                                   loggers, sample_logger, tokenizer):
+                                   loggers, tokenizer):
         """Rank 0 전용 비동기 스레드: JSONL 로드 → metric 계산 → 로깅.
 
         별도 스레드에서 실행되므로 Lightning hook을 blocking하지 않음.
@@ -397,7 +392,8 @@ class ValidationMixin:
                     metrics = molecule_evaluate(data["preds"], data["labels"], task,
                                                 tokenizer=tokenizer)
                 elif task_type == "caption":
-                    metrics = caption_evaluate(data["preds"], data["labels"], task)
+                    metrics = caption_evaluate(data["preds"], data["labels"], task,
+                                                tokenizer=tokenizer)
                 else:
                     continue
 
@@ -412,16 +408,6 @@ class ValidationMixin:
             for lg in loggers:
                 lg.log_metrics(flat, step=step)
             print(f"[Async] logger.log_metrics done", flush=True)
-
-            # WandB Table logging
-            if sample_logger:
-                wandb_lg = None
-                for lg in loggers:
-                    if type(lg).__name__ == "WandbLogger":
-                        wandb_lg = lg
-                        break
-                if wandb_lg is not None:
-                    sample_logger.flush_to_wandb(wandb_lg.experiment, epoch, step)
 
             # 영구 prediction 저장
             print(f"[Async] saving predictions...", flush=True)

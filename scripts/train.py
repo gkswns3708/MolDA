@@ -80,14 +80,13 @@ def main(cfg: DictConfig):
     # Callbacks
     log_dir = cfg.logging.dir
     callbacks = [
-        # TODO: NCCL hang 디버깅 — 모든 callback 임시 비활성화
-        # ModelCheckpoint(
-        #     dirpath=log_dir,
-        #     filename="step-{step}",
-        #     every_n_train_steps=cfg.logging.save_on_n_steps,
-        #     save_top_k=cfg.logging.save_top_k_checkpoints,
-        #     save_last=False,
-        # ),
+        ModelCheckpoint(
+            dirpath=log_dir,
+            filename="epoch={epoch}-step={step}",
+            every_n_epochs=cfg.logging.save_every_n_epochs,
+            save_top_k=-1,
+            save_last=True,
+        ),
     ]
 
     # Strategy

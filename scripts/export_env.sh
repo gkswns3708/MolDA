@@ -51,19 +51,22 @@ for req_file in "$PROJECT_ROOT/requirements_molda.txt" "$PROJECT_ROOT/requiremen
     fi
 done
 
-# --- Step 3: tar.gz 패킹 ---
+# --- Step 3: tar.gz 패킹 (src + configs + scripts + requirements만) ---
 echo ""
-echo "[3/3] 프로젝트 패킹 중 (venvs 제외)..."
+echo "[3/3] 프로젝트 패킹 중 (src/scripts/docs/requirements만)..."
 
 PARENT_DIR="$(dirname "$PROJECT_ROOT")"
 PROJECT_DIRNAME="$(basename "$PROJECT_ROOT")"
 
 tar czf "$OUTPUT_DIR/$ARCHIVE_NAME" \
     -C "$PARENT_DIR" \
-    --exclude="$PROJECT_DIRNAME/venvs" \
-    --exclude="$PROJECT_DIRNAME/MolDA_venv.zip" \
-    --exclude="$PROJECT_DIRNAME/lightning_logs" \
-    "$PROJECT_DIRNAME/"
+    "$PROJECT_DIRNAME/src/" \
+    "$PROJECT_DIRNAME/scripts/" \
+    "$PROJECT_DIRNAME/docs/" \
+    "$PROJECT_DIRNAME/test/" \
+    "$PROJECT_DIRNAME/CLAUDE.md" \
+    "$PROJECT_DIRNAME/requirements_molda.txt" \
+    "$PROJECT_DIRNAME/requirements_dataset_gen.txt"
 
 ARCHIVE_SIZE=$(du -h "$OUTPUT_DIR/$ARCHIVE_NAME" | cut -f1)
 echo "  생성 완료: $OUTPUT_DIR/$ARCHIVE_NAME ($ARCHIVE_SIZE)"
@@ -74,4 +77,7 @@ echo " 완료! 다음 단계:"
 echo "  1. $ARCHIVE_NAME 을 새 pod으로 복사"
 echo "  2. 새 pod에서 tar xzf $ARCHIVE_NAME"
 echo "  3. cd $PROJECT_DIRNAME && bash scripts/setup_env.sh"
+echo ""
+echo " [참고] dataset, checkpoint, hf-cache는 제외됨"
+echo "  → 새 pod에서 직접 다운로드/생성 필요"
 echo "============================================"

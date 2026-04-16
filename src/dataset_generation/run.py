@@ -46,28 +46,13 @@ from dataset_generation.utils import from_dict, get_num_workers, get_task_subtas
 def run_single_config(config_name, config_dir, num_workers, toy_n):
     """단일 config에 대한 전체 파이프라인 실행.
 
-    mol_representation이 리스트(예: ['selfies', 'smiles'])이면
-    각 representation에 대해 순차적으로 파이프라인을 실행한다.
+    Step 1-2는 1회 실행 (canonical SMILES 기반).
+    Step 3에서 SMILES/SELFIES 양쪽 컬럼을 동시에 생성.
     """
 
     arg_path = os.path.join(config_dir, config_name) + ".yaml"
     with open(arg_path, "r") as f:
         cfg = yaml.safe_load(f)
-
-    # mol_representation이 리스트이면 각각에 대해 재귀 실행
-    mol_repr_raw = cfg.get("mol_representation", "smiles")
-    if isinstance(mol_repr_raw, list):
-        for repr_name in mol_repr_raw:
-            print(f"\n{'*' * 70}")
-            print(f"  [both] Running mol_representation={repr_name}")
-            print(f"{'*' * 70}")
-            # representation별 data_tag 생성 (SELFIES_raw_v1 → 해당 repr 기준)
-            sub_cfg = dict(cfg)
-            sub_cfg["mol_representation"] = repr_name
-            sub_cfg["data_tag"] = "raw_v1"
-            # 임시 yaml 파일 생성 없이 직접 실행
-            _run_single_config_with_cfg(sub_cfg, config_name, num_workers, toy_n)
-        return
 
     _run_single_config_with_cfg(cfg, config_name, num_workers, toy_n)
 
@@ -81,10 +66,8 @@ def _run_single_config_with_cfg(cfg_dict, config_name, num_workers, toy_n):
     if toy_n:
         data_tag = f"{data_tag}_toy{toy_n}"
 
-    # mol_representation: "smiles" or "selfies"
-    mol_repr_name = getattr(cfg, "mol_representation", "smiles")
-    # mol_representation별 하위 폴더: dataset/Raw/SMILES/{data_tag}/
-    tag_root = os.path.join(raw_data_root, mol_repr_name.upper(), data_tag)
+    # 단일 출력 경로: dataset/Raw/{data_tag}/ (mol_representation 구분 없음)
+    tag_root = os.path.join(raw_data_root, data_tag)
     os.makedirs(tag_root, exist_ok=True)
 
     start_time = time.time()
@@ -246,7 +229,6 @@ def _run_single_config_with_cfg(cfg_dict, config_name, num_workers, toy_n):
         "fn_kwargs": {
             "system_prompt": system_prompt,
             "llm_model_name": llm_model,
-            "mol_representation": mol_repr_name,
         },
         "num_proc": num_workers,
     }
@@ -260,6 +242,16 @@ def _run_single_config_with_cfg(cfg_dict, config_name, num_workers, toy_n):
         print(f"Mapping {split_name.upper()} dataset ({len(concat_set)} examples)...")
 
         mapped_set = concat_set.map(prepare_data_instance, **map_kwargs)
+
+        # SELFIES 변환 실패 sample 제거
+        before_count = len(mapped_set)
+        mapped_set = mapped_set.filter(lambda x: x["_selfies_valid"])
+        after_count = len(mapped_set)
+        if before_count != after_count:
+            print(f"  Filtered {before_count - after_count} SELFIES-failed samples "
+                  f"({before_count} → {after_count})")
+        mapped_set = mapped_set.remove_columns(["_selfies_valid"])
+
         save_name = os.path.join(tag_root, split_name)
         mapped_set.save_to_disk(save_name)
         print(f"Saved Final {split_name} Dataset: {save_name} (Size: {len(mapped_set)})")
