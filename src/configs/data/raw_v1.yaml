@@ -1,0 +1,8 @@
+# Full dataset (raw_v1)
+tag: raw_v1
+root: raw_v1
+
+splits:
+  train: Train
+  val: Val
+  test: Test

@@ -38,8 +38,8 @@ def main():
 
     project_root = Path(__file__).resolve().parent.parent
     representations = {
-        "selfies": ("SELFIES", "SELFIES_raw_v1"),
-        "smiles": ("SMILES", "SMILES_raw_v1"),
+        "selfies": ("SELFIES", "raw_v1"),
+        "smiles": ("SMILES", "raw_v1"),
     }
     if args.repr == "both":
         targets = list(representations.values())

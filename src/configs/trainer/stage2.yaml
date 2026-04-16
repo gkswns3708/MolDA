@@ -13,8 +13,7 @@ model:
   tune_gnn: false
 
 hardware:
-  # Stage 2는 unused param 없음 (LoRA frozen이므로)
-  find_unused_parameters: true # Q-Former는? 
+  find_unused_parameters: false
 
 training:
   max_epochs: 1             # 논문 권장: 1 epoch

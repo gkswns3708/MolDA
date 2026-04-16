@@ -19,9 +19,18 @@ Usage:
         pretrained_ckpt_path=./checkpoint/selfies_dict/stage1/last.ckpt
 """
 
+import os
 import sys
 from datetime import timedelta
 from pathlib import Path
+
+# Old_MolDA에서 검증된 설정 (NCCL hang / OOM 방지)
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+import torch
+torch.set_float32_matmul_precision("medium")
 
 import hydra
 import pytorch_lightning as pl
@@ -37,6 +46,24 @@ if PROJECT_ROOT not in sys.path:
 
 from src.training.trainer import MolDATrainer
 from src.data.datamodule import MolDADataModule
+
+
+def _load_dotenv(env_path: Path = Path(PROJECT_ROOT) / ".env"):
+    """프로젝트 루트의 .env 파일에서 환경변수를 로드한다 (기존 값 덮어쓰지 않음)."""
+    if not env_path.is_file():
+        return
+    with open(env_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key, value = key.strip(), value.strip().strip("\"'")
+            if key not in os.environ:
+                os.environ[key] = value
+
+
+_load_dotenv()
 
 
 @hydra.main(config_path="../src/configs", config_name="default", version_base="1.3")
@@ -55,17 +82,10 @@ def main(cfg: DictConfig):
     callbacks = [
         ModelCheckpoint(
             dirpath=log_dir,
-            filename="step-{step}",
-            every_n_train_steps=cfg.logging.save_on_n_steps,
-            save_top_k=cfg.logging.save_top_k_checkpoints,
-            save_last=True,
-        ),
-        ModelCheckpoint(
-            dirpath=log_dir,
-            filename="val-{epoch:02d}-{step}",
+            filename="epoch={epoch}-step={step}",
             every_n_epochs=cfg.logging.save_every_n_epochs,
-            save_top_k=-1, # config로 수정할 수 있음
-            save_on_train_epoch_end=False,  # validation 끝에 저장
+            save_top_k=-1,
+            save_last=True,
         ),
     ]
 
@@ -82,6 +102,7 @@ def main(cfg: DictConfig):
         strategy = DDPStrategy(
             find_unused_parameters=cfg.hardware.find_unused_parameters,
             timeout=timedelta(minutes=90),
+            start_method="spawn",
         )
     else:
         strategy = "auto"
@@ -94,7 +115,7 @@ def main(cfg: DictConfig):
         from pytorch_lightning.loggers import WandbLogger
         wandb_logger = WandbLogger(
             project=cfg.wandb.project,
-            entity=cfg.wandb.get("entity"),
+            entity=cfg.wandb.get("entity") or os.environ.get("WANDB_ENTITY"),
             name=cfg.wandb.get("run_name"),
             save_dir=log_dir,
             id=cfg.wandb.get("id"),

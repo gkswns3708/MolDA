@@ -1,0 +1,8 @@
+# Toy set: 빠른 검증용 15-sample split
+tag: toy15
+root: toy15
+
+splits:
+  train: Train
+  val: Val
+  test: Test

@@ -33,6 +33,7 @@ class MolDA(nn.Module):
             log_nan=cfg.logging.get("log_nan_details", True),
             nan_log_dir=cfg.logging.get("nan_log_dir", "./nan_logs"),
             eos_token_id=self.llada.tokenizer.eos_token_id,
+            normalization=cfg.training.get("loss_normalization", "global"),
         )
 
         # Stage 2+: GNN + Q-Former (stubs for now)

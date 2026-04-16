@@ -1,6 +1,5 @@
 raw_data_root: /opt/11-MolDA/New_MolDA/dataset/Raw
-data_tag: raw_v1  # both 모드에서는 mol_representation별로 {REPR}_raw_v1로 자동 생성
-mol_representation: ['selfies', 'smiles']
+data_tag: raw_v1
 llm_model: "GSAI-ML/LLaDA-8B-Instruct"
 
 target_benchmarks:

@@ -15,3 +15,4 @@ test/*.ini
 docs/
 *.zip
 src/dataset
+.env

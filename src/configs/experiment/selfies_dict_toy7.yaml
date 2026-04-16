@@ -8,7 +8,7 @@
 #       pretrained_ckpt_path=./checkpoint/selfies_dict/stage1/last.ckpt
 
 defaults:
-  - override /data: chebi-20-mol2text
+  - override /data: toy7
 
 model:
   weight_tying: false
@@ -25,7 +25,7 @@ training:
   global_batch_size: 1029
 
 validation:
-  check_val_every_n_epoch: 20
+  check_val_every_n_epoch: 1
 
 wandb:
   enabled: true

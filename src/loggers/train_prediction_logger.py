@@ -5,8 +5,13 @@
     2. training_step()에서 should_log() 확인 → batch에 _log_train_detail 플래그 설정
     3. model forward()가 prediction detail 반환
     4. write_sample_log()로 TXT 저장
+
+파일 구조:
+    {log_dir}/train_predictions/{task}/epoch{XX}.txt
+    모든 rank가 동일 파일에 append하며, fcntl.flock으로 동시 쓰기를 직렬화한다.
 """
 
+import fcntl
 import logging
 import os
 from typing import Optional
@@ -19,7 +24,12 @@ TOKEN_WIDTH = 20
 
 
 class TrainPredictionLogger:
-    """Train step의 masked position별 prediction 상세를 주기적으로 TXT로 기록."""
+    """Train step의 masked position별 prediction 상세를 주기적으로 TXT로 기록.
+
+    global_step 기준으로 로깅 여부를 결정하되, 동일 step 내
+    accumulation micro-batch 중복을 _last_logged_step으로 방지한다.
+    모든 GPU(rank)에서 독립적으로 기록하여 multi-task sampling 커버리지를 확보한다.
+    """
 
     def __init__(
         self,
@@ -30,7 +40,7 @@ class TrainPredictionLogger:
     ):
         """
         Args:
-            log_dir: 로그 파일 저장 디렉토리 (하위에 train_predictions/ 생성)
+            log_dir: 로그 파일 저장 디렉토리 (하위에 train_predictions/{task}/ 생성)
             log_interval: 상세 로그 기록 간격 (global steps)
             max_positions: 출력할 최대 masked position 수
             enabled: False면 모든 로깅 비활성화
@@ -39,15 +49,26 @@ class TrainPredictionLogger:
         self.log_interval = max(1, log_interval)
         self.max_positions = max_positions
         self.enabled = enabled
+        self._last_logged_step: int = -1
 
     def should_log(self, global_step: int) -> bool:
-        """현재 step에서 상세 로그를 기록할지 결정."""
-        return self.enabled and global_step % self.log_interval == 0
+        """현재 step에서 상세 로그를 기록할지 결정.
+
+        global_step 기준 interval 체크 + 동일 step 중복 방지.
+        """
+        if not self.enabled:
+            return False
+        if global_step % self.log_interval != 0:
+            return False
+        if global_step == self._last_logged_step:
+            return False
+        return True
 
     def write_sample_log(
         self,
         global_step: int,
         epoch: int,
+        rank: int,
         task: str,
         p_mask: float,
         mask_positions: torch.Tensor,
@@ -65,10 +86,14 @@ class TrainPredictionLogger:
     ):
         """1개 sample의 masked position별 prediction 상세를 TXT로 저장.
 
+        파일 경로: {log_dir}/{task}/epoch{XX}.txt
+        여러 rank가 동시에 쓸 수 있으므로 fcntl.flock으로 직렬화한다.
+
         Args:
             global_step: 현재 global step
             epoch: 현재 epoch
-            task: task 이름
+            rank: GPU rank (헤더에 표시용)
+            task: task 이름 (폴더 분리 기준)
             p_mask: masking probability (0~1)
             mask_positions: [N] masked position indices (CPU)
             target_tokens: [N] ground truth token ids (CPU)
@@ -80,7 +105,12 @@ class TrainPredictionLogger:
         if not self.enabled:
             return
 
-        os.makedirs(self.log_dir, exist_ok=True)
+        # 동일 step 중복 기록 방지
+        self._last_logged_step = global_step
+
+        # {log_dir}/{task}/
+        task_dir = os.path.join(self.log_dir, task)
+        os.makedirs(task_dir, exist_ok=True)
 
         n_positions = len(mask_positions)
         n_correct = (pred_tokens == target_tokens).sum().item()
@@ -92,9 +122,10 @@ class TrainPredictionLogger:
         n_positions_no_eos = int(non_eos.sum().item())
         n_correct_no_eos = int((pred_tokens[non_eos] == target_tokens[non_eos]).sum().item()) if n_positions_no_eos > 0 else 0
 
-        filename = f"train_predictions_epoch{epoch:02d}.txt"
-        filepath = os.path.join(self.log_dir, filename)
+        filename = f"epoch{epoch:02d}.txt"
+        filepath = os.path.join(task_dir, filename)
 
+        # 문자열 전체를 미리 조립 (lock 구간 최소화)
         lines = []
         sep = "=" * 80
 
@@ -102,7 +133,7 @@ class TrainPredictionLogger:
         lines.append(sep)
         lines.append(
             f"[Train Sample] step={global_step} | epoch={epoch} | "
-            f"task={task} | mask_ratio={p_mask:.3f}"
+            f"rank={rank} | task={task} | mask_ratio={p_mask:.3f}"
         )
         lines.append(
             f"[Summary] accuracy={n_correct}/{n_positions} "
@@ -194,11 +225,19 @@ class TrainPredictionLogger:
 
         lines.append("")
 
+        content = "\n".join(lines)
+
+        # 파일 잠금으로 multi-rank 동시 쓰기 직렬화
         with open(filepath, "a", encoding="utf-8") as f:
-            f.write("\n".join(lines))
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                f.write(content)
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
 
         logger.info(
-            f"Train prediction log (acc={n_correct}/{n_positions}, "
+            f"Train prediction log (rank={rank}, task={task}, "
+            f"acc={n_correct}/{n_positions}, "
             f"acc_no_eos={n_correct_no_eos}/{n_positions_no_eos}, "
             f"target_prob={avg_target_prob:.4f}) saved to {filepath}"
         )

@@ -1,7 +1,7 @@
 # Top-level config: toy dataset + Stage 1 (SMILES)
 defaults:
   - trainer: stage1
-  - data: SMILES_toy100
+  - data: toy100
   - _self_
 
 # Runtime
