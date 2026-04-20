@@ -1,4 +1,4 @@
-raw_data_root: /opt/11-MolDA/New_MolDA/dataset/Raw
+raw_data_root: /opt/EMNLP_MolDA/New_MolDA/dataset/Raw
 data_tag: raw_v1
 llm_model: "GSAI-ML/LLaDA-8B-Instruct"
 
