@@ -1,0 +1,112 @@
+{
+  "citation": "",
+  "description": "",
+  "features": {
+    "x": {
+      "feature": {
+        "feature": {
+          "dtype": "int64",
+          "_type": "Value"
+        },
+        "_type": "Sequence"
+      },
+      "_type": "Sequence"
+    },
+    "edge_index": {
+      "feature": {
+        "feature": {
+          "dtype": "int64",
+          "_type": "Value"
+        },
+        "_type": "Sequence"
+      },
+      "_type": "Sequence"
+    },
+    "edge_attr": {
+      "feature": {
+        "feature": {
+          "dtype": "int64",
+          "_type": "Value"
+        },
+        "_type": "Sequence"
+      },
+      "_type": "Sequence"
+    },
+    "label": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "input_mol_string": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "task_subtask_pair": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "instruction": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "additional_x": {
+      "feature": {
+        "feature": {
+          "dtype": "int64",
+          "_type": "Value"
+        },
+        "_type": "Sequence"
+      },
+      "_type": "Sequence"
+    },
+    "additional_edge_index": {
+      "feature": {
+        "feature": {
+          "dtype": "int64",
+          "_type": "Value"
+        },
+        "_type": "Sequence"
+      },
+      "_type": "Sequence"
+    },
+    "additional_edge_attr": {
+      "feature": {
+        "feature": {
+          "dtype": "int64",
+          "_type": "Value"
+        },
+        "_type": "Sequence"
+      },
+      "_type": "Sequence"
+    },
+    "task": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "prompt_text_smiles": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "prompt_text_selfies": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "target_text_smiles": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "target_text_selfies": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "input_mol_string_smiles": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "input_mol_string_selfies": {
+      "dtype": "string",
+      "_type": "Value"
+    }
+  },
+  "homepage": "",
+  "license": ""
+}

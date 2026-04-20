@@ -1,0 +1,31 @@
+{
+  "_data_files": [
+    {
+      "filename": "data-00000-of-00001.arrow"
+    }
+  ],
+  "_fingerprint": "3e9e2472d0f2233e",
+  "_format_columns": [
+    "additional_edge_attr",
+    "additional_edge_index",
+    "additional_x",
+    "edge_attr",
+    "edge_index",
+    "input_mol_string",
+    "input_mol_string_selfies",
+    "input_mol_string_smiles",
+    "instruction",
+    "label",
+    "prompt_text_selfies",
+    "prompt_text_smiles",
+    "target_text_selfies",
+    "target_text_smiles",
+    "task",
+    "task_subtask_pair",
+    "x"
+  ],
+  "_format_kwargs": {},
+  "_format_type": null,
+  "_output_all_columns": false,
+  "_split": null
+}

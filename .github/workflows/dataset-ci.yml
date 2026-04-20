@@ -1,0 +1,104 @@
+name: dataset-ci
+
+on:
+  push:
+    branches:
+      - develop
+      - main
+      - 'feature/dataset-*'
+      - 'feature/generate_dataset'
+      - 'dataset/**'
+    paths:
+      - 'src/dataset_generation/**'
+      - 'src/data/**'
+      - 'src/configs/data/**'
+      - 'src/configs/download/**'
+      - 'src/benchmark_constants.py'
+      - 'src/training/metrics.py'
+      - 'src/model/added_tokens.py'
+      - 'test/**'
+      - 'dataset/toy100/**'
+      - 'requirements_molda.txt'
+      - '.github/workflows/dataset-ci.yml'
+  pull_request:
+    branches: [develop, main]
+    paths:
+      - 'src/dataset_generation/**'
+      - 'src/data/**'
+      - 'src/configs/data/**'
+      - 'src/configs/download/**'
+      - 'src/benchmark_constants.py'
+      - 'src/training/metrics.py'
+      - 'src/model/added_tokens.py'
+      - 'test/**'
+      - 'dataset/toy100/**'
+      - 'requirements_molda.txt'
+      - '.github/workflows/dataset-ci.yml'
+
+jobs:
+  cpu-tests:
+    name: Dataset + CPU tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: pip
+          cache-dependency-path: requirements_molda.txt
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxrender1 libxext6
+
+      - name: Install Python deps (CPU-only torch + requirements)
+        run: |
+          python -m pip install --upgrade pip
+          # CPU-only torch — prevents pulling large CUDA wheels on CI runner.
+          pip install torch==2.3.0 --index-url https://download.pytorch.org/whl/cpu
+          # requirements_molda.txt may pin CUDA-flavored torch; installing CPU
+          # torch first and then using --upgrade-strategy only-if-needed keeps
+          # the CPU build unless a strict constraint forces otherwise.
+          pip install --upgrade-strategy only-if-needed -r requirements_molda.txt
+
+      - name: Sanity — toy100 fixture exists
+        run: |
+          test -d dataset/toy100/Train || (echo "dataset/toy100/Train missing" && exit 1)
+          test -d dataset/toy100/Val   || (echo "dataset/toy100/Val missing"   && exit 1)
+          test -d dataset/toy100/Test  || (echo "dataset/toy100/Test missing"  && exit 1)
+          python -c "
+          from datasets import load_from_disk
+          d = load_from_disk('dataset/toy100/Train')
+          print('train rows:', len(d))
+          print('train cols:', sorted(d.column_names))
+          "
+
+      - name: Run dataset + data-layer tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/src
+        run: |
+          # dataset 마커가 붙은 새 테스트 + data 레이어 테스트만 실행.
+          # test_loss/test_metrics/test_logging 등은 이번 PR scope 외
+          # (NLTK 리소스, logger 시그니처 등 독립 이슈).
+          pytest \
+            test/test_dual_column_schema.py \
+            test/test_mol_token_type_selection.py \
+            test/test_validate_generated_dataset.py \
+            test/test_dataset.py \
+            test/test_datamodule.py \
+            test/test_collator.py \
+            test/test_dedup.py \
+            -m "not gpu and not slow" \
+            --junitxml=test/report_ci.xml \
+            --tb=short -v
+
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-cpu
+          path: test/report_ci.xml
