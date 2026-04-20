@@ -1,5 +1,7 @@
 venvs/
 dataset/*
+!dataset/toy100/
+!dataset/toy100/**
 !dataset/Train_toy100/
 !dataset/Val_toy100/
 !dataset/Test_toy100/
@@ -16,3 +18,4 @@ docs/
 *.zip
 src/dataset
 .env
+__pycache__/
