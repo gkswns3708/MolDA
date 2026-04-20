@@ -622,12 +622,15 @@ def get_dataset(task_name, raw_data_root, toy_n=None):
     def _maybe_sample(ds, n):
         if n is None or ds is None:
             return ds
-        if hasattr(ds, "select"):
-            # HuggingFace Dataset
-            indices = list(range(min(n, len(ds))))
-            return ds.select(indices)
-        elif hasattr(ds, "head"):
+        if hasattr(ds, "shuffle") and hasattr(ds, "select"):
+            # HuggingFace Dataset — shuffle for representative toy set
+            k = min(n, len(ds))
+            return ds.shuffle(seed=42).select(range(k))
+        elif hasattr(ds, "sample"):
             # pandas DataFrame
+            k = min(n, len(ds))
+            return ds.sample(n=k, random_state=42).reset_index(drop=True)
+        elif hasattr(ds, "head"):
             return ds.head(n)
         return ds
 
@@ -693,7 +696,7 @@ def get_dataset(task_name, raw_data_root, toy_n=None):
             dataset = mol_instruction_dataset[task_name]
 
         train_dataset = dataset.filter(lambda x: "train" in x["metadata"])
-        split = train_dataset.train_test_split(test_size=0.02, shuffle=True)
+        split = train_dataset.train_test_split(test_size=0.02, shuffle=True, seed=42)
         train_dataset, valid_dataset = split["train"], split["test"]
         test_dataset = dataset.filter(lambda x: "test" in x["metadata"])
 
@@ -815,15 +818,18 @@ def prepare_data_instance(
     input_mol_string_smiles = _normalize_tag_spacing(input_mol_string_smiles, "SMILES")
     input_mol_string_selfies = _normalize_tag_spacing(input_mol_string_selfies, "SELFIES")
 
-    # Prompt 빌드 (SMILES / SELFIES 각각)
+    # Prompt 빌드 (SMILES / SELFIES 각각) — 공식 Mol-LLM 포맷과 일치:
+    #   graph_sequence는 공백 없이 `<GRAPH><mol>...<mol></GRAPH>`
+    #   <INPUT> 위치에 input_mol_string + graph_sequence를 한 번에 치환
     instruction = data_instance["instruction"]
-    graph_sequence = "<GRAPH> " + mol_token * num_query_tokens + " </GRAPH>"
+    assert "<INPUT>" in instruction, (
+        f"instruction must contain <INPUT>: task={data_instance.get('task_subtask_pair')!r}, "
+        f"instruction={instruction!r}"
+    )
+    graph_sequence = "<GRAPH>" + mol_token * num_query_tokens + "</GRAPH>"
 
-    prompt_smiles = instruction.replace("<INPUT>", input_mol_string_smiles) if "<INPUT>" in instruction else instruction
-    prompt_smiles += graph_sequence
-
-    prompt_selfies = instruction.replace("<INPUT>", input_mol_string_selfies) if "<INPUT>" in instruction else instruction
-    prompt_selfies += graph_sequence
+    prompt_smiles = instruction.replace("<INPUT>", input_mol_string_smiles + graph_sequence)
+    prompt_selfies = instruction.replace("<INPUT>", input_mol_string_selfies + graph_sequence)
 
     formatted_prompt_smiles = _build_formatted_prompt(prompt_smiles, system_prompt, llm_model_name)
     formatted_prompt_selfies = _build_formatted_prompt(prompt_selfies, system_prompt, llm_model_name)
