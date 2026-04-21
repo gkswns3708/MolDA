@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_ROOT="/opt/11-MolDA/New_MolDA"
+PROJECT_ROOT="/opt/EMNLP_MolDA/New_MolDA"
 VENV="${PROJECT_ROOT}/venvs/MolDA"
 TEST_DIR="${PROJECT_ROOT}/test"
 

@@ -37,5 +37,9 @@ class MoleculeDataset(Dataset):
             item["prompt_text"] = item[f"prompt_text_{suffix}"]
             item["target_text"] = item[f"target_text_{suffix}"]
             item["input_mol_string"] = item[f"input_mol_string_{suffix}"]
-
+        else:
+            item = dict(item)
+        # DDP DistributedSampler padding duplicate 식별용 원본 dataset idx.
+        # validation에서 aggregation 시 (val_idx, strategy) key로 dedup.
+        item["_val_idx"] = int(idx)
         return item

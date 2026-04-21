@@ -86,6 +86,9 @@ class TestStepwiseLogger:
 
 class _MockTokenizer:
     """Simple mock tokenizer: decode maps token_id → 'T<id>'."""
+    # 0 represents padding/EOS in these tests — matches fixture data below.
+    eos_token_id = 0
+
     def decode(self, ids, skip_special_tokens=False):
         return " ".join(f"T{i}" for i in ids)
 
@@ -108,7 +111,7 @@ class TestTrainPredictionLogger:
 
     def test_write_creates_file(self, tpl, tmp_path):
         tpl.write_sample_log(
-            global_step=0, epoch=0, task="test_task", p_mask=0.5,
+            global_step=0, epoch=0, rank=0, task="test_task", p_mask=0.5,
             mask_positions=torch.tensor([3]),
             target_tokens=torch.tensor([10]),
             pred_tokens=torch.tensor([10]),
@@ -116,13 +119,13 @@ class TestTrainPredictionLogger:
             pred_probs=torch.tensor([0.9]),
             tokenizer=_MockTokenizer(),
         )
-        filepath = tmp_path / "train_predictions" / "step000000_epoch00_test_task.txt"
+        filepath = tmp_path / "train_predictions" / "test_task" / "epoch00.txt"
         assert filepath.exists()
 
     def test_write_backward_compatible_without_new_params(self, tpl, tmp_path):
         """write_sample_log works without the new optional parameters."""
         tpl.write_sample_log(
-            global_step=5, epoch=1, task="compat", p_mask=0.3,
+            global_step=5, epoch=1, rank=0, task="compat", p_mask=0.3,
             mask_positions=torch.tensor([2, 4]),
             target_tokens=torch.tensor([10, 20]),
             pred_tokens=torch.tensor([10, 99]),
@@ -130,7 +133,7 @@ class TestTrainPredictionLogger:
             pred_probs=torch.tensor([0.8, 0.6]),
             tokenizer=_MockTokenizer(),
         )
-        filepath = tmp_path / "train_predictions" / "step000005_epoch01_compat.txt"
+        filepath = tmp_path / "train_predictions" / "compat" / "epoch01.txt"
         content = filepath.read_text()
         # Per-token table should still exist
         assert "Ground Truth" in content
@@ -148,7 +151,7 @@ class TestTrainPredictionLogger:
         all_answer_pred_ids = torch.tensor([10, 99, 12, 0, 0])
 
         tpl.write_sample_log(
-            global_step=10, epoch=0, task="retro", p_mask=0.4,
+            global_step=10, epoch=0, rank=0, task="retro", p_mask=0.4,
             mask_positions=torch.tensor([4]),
             target_tokens=torch.tensor([11]),
             pred_tokens=torch.tensor([99]),
@@ -162,7 +165,7 @@ class TestTrainPredictionLogger:
             attention_mask=attention_mask,
         )
 
-        filepath = tmp_path / "train_predictions" / "step000010_epoch00_retro.txt"
+        filepath = tmp_path / "train_predictions" / "retro" / "epoch00.txt"
         content = filepath.read_text()
 
         assert "[Input (Prompt)]" in content
@@ -186,7 +189,7 @@ class TestTrainPredictionLogger:
         all_answer_pred_ids = torch.tensor([10, 11, 0, 0, 0])
 
         tpl.write_sample_log(
-            global_step=0, epoch=0, task="pad_test", p_mask=0.5,
+            global_step=0, epoch=0, rank=0, task="pad_test", p_mask=0.5,
             mask_positions=torch.tensor([3]),
             target_tokens=torch.tensor([11]),
             pred_tokens=torch.tensor([11]),
@@ -200,7 +203,7 @@ class TestTrainPredictionLogger:
             attention_mask=attention_mask,
         )
 
-        filepath = tmp_path / "train_predictions" / "step000000_epoch00_pad_test.txt"
+        filepath = tmp_path / "train_predictions" / "pad_test" / "epoch00.txt"
         content = filepath.read_text()
 
         # Extract the GT line — should be "T10 T11" (2 real answer tokens only)
