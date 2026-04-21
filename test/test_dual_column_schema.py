@@ -1,6 +1,6 @@
 """Dual-column Arrow dataset 계약 검증.
 
-Step 3 산출물(`dataset/toy100/{Train,Val,Test}`)이 다음을 만족하는지 테스트:
+Step 3 산출물(`dataset/Processed/toy100/{Train,Val,Test}`)이 다음을 만족하는지 테스트:
 - 6개 dual column 존재 (prompt/target/input_mol_string × smiles/selfies)
 - 태그가 표현 타입에 맞게 배치 (`<SMILES>`는 *_smiles에만, `<SELFIES>`는 *_selfies에만)
 - SMILES/SELFIES 내용이 각각 유효하고 round-trip 가능

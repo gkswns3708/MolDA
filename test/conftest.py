@@ -31,7 +31,7 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "gpu: requires GPU (CUDA)")
     config.addinivalue_line("markers", "slow: slow tests (model loading, >10s)")
     config.addinivalue_line("markers", "integration: integration tests spanning multiple components")
-    config.addinivalue_line("markers", "dataset: tests requiring the committed dataset/toy100 fixture")
+    config.addinivalue_line("markers", "dataset: tests requiring the committed dataset/Processed/toy100 fixture")
 
 
 def pytest_collection_modifyitems(config, items):
@@ -89,7 +89,7 @@ def load_config(config_name: str = "toy_SELFIES") -> OmegaConf:
     test_overrides = {
         "hardware": {"devices": "0"},
         "training": {"global_batch_size": 4},  # 1 device × batch_size 4 × accum 1
-        "data": {"root": os.path.join(DATASET_ROOT, "toy100")},
+        "data": {"root": os.path.join(DATASET_ROOT, "Processed", "toy100")},
         "tokenizer": {
             "selfies_dict_path": os.path.join(PROJECT_ROOT, "src", "model", "selfies_dict.txt"),
         },

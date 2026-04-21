@@ -1,7 +1,7 @@
 """Dual-column 생성 데이터셋 검증 (CLI 스크립트).
 
 Usage:
-    python test/validate_generated_dataset.py --data_root dataset/toy100
+    python test/validate_generated_dataset.py --data_root dataset/Processed/toy100
 
 검증 항목:
     1. 기본 무결성: dual column 존재, null/빈값, 데이터 타입
@@ -283,7 +283,7 @@ def validate_split(ds, split_name: str, sample_limit: int = 5000):
 
 def main():
     parser = argparse.ArgumentParser(description="Validate dual-column generated dataset")
-    parser.add_argument("--data_root", type=str, default="dataset/toy100",
+    parser.add_argument("--data_root", type=str, default="dataset/Processed/toy100",
                         help="Path to dataset root (contains Train/Val/Test).")
     parser.add_argument("--sample_limit", type=int, default=5000,
                         help="Max samples to check per split (0=all)")

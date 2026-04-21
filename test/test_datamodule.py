@@ -6,6 +6,8 @@ from torch.utils.data import DataLoader
 
 from src.data.datamodule import MolDADataModule
 
+pytestmark = pytest.mark.dataset
+
 
 @pytest.mark.integration
 class TestDataModuleSetup:
