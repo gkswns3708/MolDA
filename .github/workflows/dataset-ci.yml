@@ -17,7 +17,7 @@ on:
       - 'src/training/metrics.py'
       - 'src/model/added_tokens.py'
       - 'test/**'
-      - 'dataset/toy100/**'
+      - 'dataset/Processed/toy100/**'
       - 'requirements_molda.txt'
       - '.github/workflows/dataset-ci.yml'
   pull_request:
@@ -31,7 +31,7 @@ on:
       - 'src/training/metrics.py'
       - 'src/model/added_tokens.py'
       - 'test/**'
-      - 'dataset/toy100/**'
+      - 'dataset/Processed/toy100/**'
       - 'requirements_molda.txt'
       - '.github/workflows/dataset-ci.yml'
 
@@ -67,12 +67,12 @@ jobs:
 
       - name: Sanity — toy100 fixture exists
         run: |
-          test -d dataset/toy100/Train || (echo "dataset/toy100/Train missing" && exit 1)
-          test -d dataset/toy100/Val   || (echo "dataset/toy100/Val missing"   && exit 1)
-          test -d dataset/toy100/Test  || (echo "dataset/toy100/Test missing"  && exit 1)
+          test -d dataset/Processed/toy100/Train || (echo "dataset/Processed/toy100/Train missing" && exit 1)
+          test -d dataset/Processed/toy100/Val   || (echo "dataset/Processed/toy100/Val missing"   && exit 1)
+          test -d dataset/Processed/toy100/Test  || (echo "dataset/Processed/toy100/Test missing"  && exit 1)
           python -c "
           from datasets import load_from_disk
-          d = load_from_disk('dataset/toy100/Train')
+          d = load_from_disk('dataset/Processed/toy100/Train')
           print('train rows:', len(d))
           print('train cols:', sorted(d.column_names))
           "

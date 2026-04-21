@@ -16,7 +16,6 @@ from rdkit import Chem
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
-import instructions_smol
 import model.added_tokens as added_tokens
 from benchmark_constants import (
     CLASSIFICATION_BENCHMARKS,
@@ -25,6 +24,7 @@ from benchmark_constants import (
     REACTION_BENCHMARKS,
     TEXT2MOL_BENCHMARKS,
 )
+from dataset_generation import instructions_smol
 from dataset_generation.utils import (
     clean_mol_string,
     convert_mol_representation,
@@ -329,12 +329,29 @@ def _parallel_process(process_fn, args_list, num_workers, desc="Processing"):
             results.append(process_fn(args))
         return results
 
+    # submit+as_completed 경로로 전환. executor.map은 워커가 죽으면
+    # BrokenProcessPool만 던지고 실제 예외 내용을 감춘다. submit 쓰면 각
+    # future에 개별 예외가 붙어 원인(OOM/segfault/import error)을 볼 수 있음.
+    from concurrent.futures import as_completed, BrokenExecutor
+    results = [None] * len(args_list)
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        results = list(tqdm(
-            executor.map(process_fn, args_list, chunksize=max(1, len(args_list) // (num_workers * 4))),
-            total=len(args_list),
-            desc=desc,
-        ))
+        futures = {executor.submit(process_fn, a): i for i, a in enumerate(args_list)}
+        try:
+            for f in tqdm(as_completed(futures), total=len(futures), desc=desc):
+                idx = futures[f]
+                try:
+                    results[idx] = f.result()
+                except Exception as e:
+                    # 워커 예외를 로그하되 파이프라인은 계속 진행.
+                    # 결과는 None으로 남겨두고 dataset_to_arrow_dicts 단계에서 필터됨.
+                    print(f"[WARN] worker failed on item {idx} ({desc}): "
+                          f"{type(e).__name__}: {e}")
+                    results[idx] = None
+        except BrokenExecutor as e:
+            # ProcessPool 전체가 깨진 경우(예: OOM killer) 최대한 완료된
+            # 결과만 수집하고 나머지는 None.
+            print(f"[ERROR] ProcessPool broken ({desc}): {e}. "
+                  f"Completed {sum(r is not None for r in results)}/{len(args_list)} items.")
     return results
 
 
@@ -820,16 +837,18 @@ def prepare_data_instance(
 
     # Prompt 빌드 (SMILES / SELFIES 각각) — 공식 Mol-LLM 포맷과 일치:
     #   graph_sequence는 공백 없이 `<GRAPH><mol>...<mol></GRAPH>`
-    #   <INPUT> 위치에 input_mol_string + graph_sequence를 한 번에 치환
+    #   <INPUT> 위치에 input_mol_string + graph_sequence를 한 번에 치환.
+    #   text2mol 계열은 템플릿에 <INPUT>이 없으므로 graph_sequence를 뒤에 append.
     instruction = data_instance["instruction"]
-    assert "<INPUT>" in instruction, (
-        f"instruction must contain <INPUT>: task={data_instance.get('task_subtask_pair')!r}, "
-        f"instruction={instruction!r}"
-    )
     graph_sequence = "<GRAPH>" + mol_token * num_query_tokens + "</GRAPH>"
 
-    prompt_smiles = instruction.replace("<INPUT>", input_mol_string_smiles + graph_sequence)
-    prompt_selfies = instruction.replace("<INPUT>", input_mol_string_selfies + graph_sequence)
+    if "<INPUT>" in instruction:
+        prompt_smiles = instruction.replace("<INPUT>", input_mol_string_smiles + graph_sequence)
+        prompt_selfies = instruction.replace("<INPUT>", input_mol_string_selfies + graph_sequence)
+    else:
+        # text2mol: 입력이 description 텍스트이므로 graph_sequence만 append
+        prompt_smiles = instruction + graph_sequence
+        prompt_selfies = instruction + graph_sequence
 
     formatted_prompt_smiles = _build_formatted_prompt(prompt_smiles, system_prompt, llm_model_name)
     formatted_prompt_selfies = _build_formatted_prompt(prompt_selfies, system_prompt, llm_model_name)

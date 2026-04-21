@@ -1,0 +1,8 @@
+# Train = raw_v1 + 10x rephrase; Val/Test = raw_v1 복사본 (hardlink)
+tag: raw_v1_10x_rephrase
+root: raw_v1_10x_rephrase
+
+splits:
+  train: Train
+  val: Val
+  test: Test

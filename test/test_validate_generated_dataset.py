@@ -2,7 +2,7 @@
 
 toy100 fixture에 대해 dual-column validator를 돌려 errors가 0인지 검증.
 CLI로 자세한 리포트를 보려면:
-    python test/validate_generated_dataset.py --data_root dataset/toy100
+    python test/validate_generated_dataset.py --data_root dataset/Processed/toy100
 """
 
 import os

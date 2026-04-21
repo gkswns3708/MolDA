@@ -1,7 +1,9 @@
 venvs/
 dataset/*
-!dataset/toy100/
-!dataset/toy100/**
+!dataset/Processed/
+dataset/Processed/*
+!dataset/Processed/toy100/
+!dataset/Processed/toy100/**
 !dataset/Train_toy100/
 !dataset/Val_toy100/
 !dataset/Test_toy100/
@@ -19,3 +21,4 @@ docs/
 src/dataset
 .env
 __pycache__/
+.vscode

@@ -1,0 +1,37 @@
+# Top-level config: toy dataset + Stage 1 (SELFIES, no mol_dict)
+# SELFIES vocab을 tokenizer special token으로 등록하지 않고 일반 BPE로 쪼개는 variant.
+# toy_SELFIES.yaml과 짝을 이루어 add_mol_dict on/off 비교 용도.
+defaults:
+  - trainer: stage1
+  - data: toy100
+  - _self_
+
+seed: 42
+mode: ft
+ckpt_path: null
+debug: false
+
+tokenizer:
+  mol_token_type: selfies
+  add_mol_dict: false   # <-- toy_SELFIES.yaml과의 유일한 차이
+
+wandb:
+  enabled: false
+  project: MolDA
+  entity: null
+  run_name: null
+  tags: [selfies, no_dict]
+  group: null
+
+hydra:
+  run:
+    dir: .
+  sweep:
+    dir: .
+  job:
+    chdir: false
+  output_subdir: logs/.hydra
+  job_logging:
+    handlers:
+      file:
+        filename: logs/train.log
