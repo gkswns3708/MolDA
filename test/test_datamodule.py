@@ -42,8 +42,11 @@ class TestDataLoaders:
         assert dl.drop_last is True
 
     def test_val_dataloader_drop_last(self, dm):
+        # Step C 변경: DDP DistributedSampler가 padding으로 rank별 batch 수를 맞추므로
+        # val_dataloader는 drop_last=False로 partial batch까지 metric 계산에 포함.
+        # padding으로 인한 sample 중복은 _val_idx 기반 dedup(validation.py)으로 제거.
         dl = dm.val_dataloader()
-        assert dl.drop_last is True
+        assert dl.drop_last is False
 
     def test_train_batch_shapes(self, dm, cfg):
         dl = dm.train_dataloader()

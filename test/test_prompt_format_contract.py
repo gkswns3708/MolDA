@@ -116,13 +116,18 @@ def test_graph_sequence_attached_immediately_after_mol_string_at_input_site():
 
 
 # ---------------------------------------------------------------------------
-# <INPUT> assertion (official contract)
+# <INPUT> placeholder handling
 # ---------------------------------------------------------------------------
 
-def test_instruction_without_input_placeholder_raises():
-    bad = _make_instance(instruction="Please answer concisely.")
-    with pytest.raises(AssertionError, match=r"instruction must contain <INPUT>"):
-        prepare_data_instance(bad, SYSTEM_PROMPT)
+def test_instruction_without_input_placeholder_appends_graph_sequence():
+    """text2mol 계열은 instruction에 <INPUT>이 없음.
+    이 경우 prepare_data_instance는 raise하지 말고 graph_sequence를 끝에 append해야 한다."""
+    no_input_inst = _make_instance(instruction="Please describe the following molecule.")
+    out = prepare_data_instance(no_input_inst, SYSTEM_PROMPT)
+    # 양쪽 컬럼 모두 graph_sequence가 prompt 안에 들어가 있어야 함
+    for key in ("prompt_text_smiles", "prompt_text_selfies"):
+        assert "<GRAPH>" in out[key]
+        assert "</GRAPH>" in out[key]
 
 
 # ---------------------------------------------------------------------------
