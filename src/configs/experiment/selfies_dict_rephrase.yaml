@@ -1,0 +1,30 @@
+# @package _global_
+# ───────────────────────────────────────────────────
+# Experiment: SELFIES + molecular dictionary on raw_v1_10x_rephrase
+# Train = 10x rephrase, Val/Test = raw_v1 복사본
+# ───────────────────────────────────────────────────
+# Usage:
+#   python scripts/train.py +experiment=selfies_dict_rephrase trainer=stage1
+
+defaults:
+  - override /data: raw_v1_10x_rephrase
+
+tokenizer:
+  mol_token_type: selfies
+  add_mol_dict: true
+
+wandb:
+  enabled: true
+  project: MolDA_pro6000
+  run_name: selfies_dict_rephrase_s${stage}
+  tags: [selfies, dict, raw_v1_10x_rephrase]
+  group: selfies_dict_rephrase
+
+logging:
+  dir: ./checkpoint/selfies_dict_rephrase/stage${stage}
+
+training:
+  max_epochs: 20
+  batch_size: 18
+  global_batch_size: 1080 
+
