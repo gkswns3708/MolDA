@@ -23,6 +23,21 @@ def _make_samples(n=3, with_graph=False):
     return samples
 
 
+def _real_len(sample, prompt_len, tokenizer, collator):
+    """Compute actual content length (prompt + target + EOS) matching collator logic.
+
+    LLaDA TrainCollator uses all-1 attention_mask (padding EOS is part of the answer),
+    so attention_mask cannot be used to find sequence end. Reconstruct from inputs instead.
+    """
+    prompt_text = sample["prompt_text"]
+    if collator.mol_representation == "string_only":
+        from src.data.collator import GRAPH_PATTERN
+        prompt_text = GRAPH_PATTERN.sub("", prompt_text)
+    target_ids = tokenizer.encode(sample["target_text"], add_special_tokens=False)
+    real_len = prompt_len + len(target_ids) + 1  # +1 for trailing EOS
+    return min(real_len, collator.max_length)
+
+
 class TestTrainCollator:
 
     def test_output_shapes(self, real_tokenizer):
@@ -36,12 +51,12 @@ class TestTrainCollator:
 
     def test_right_padding_with_eos(self, real_tokenizer):
         collator = TrainCollator(real_tokenizer, max_length=256)
-        batch = collator(_make_samples(1))
+        samples = _make_samples(1)
+        batch = collator(samples)
         ids = batch["input_ids"][0]
-        attn = batch["attention_mask"][0]
         eos_id = real_tokenizer.eos_token_id
-        # Find where padding starts
-        pad_start = attn.sum().item()
+        prompt_len = batch["prompt_lengths"][0].item()
+        pad_start = _real_len(samples[0], prompt_len, real_tokenizer, collator)
         if pad_start < len(ids):
             assert (ids[pad_start:] == eos_id).all()
 
@@ -59,36 +74,38 @@ class TestTrainCollator:
 
     def test_labels_answer_has_token_ids(self, real_tokenizer):
         collator = TrainCollator(real_tokenizer, max_length=256)
-        batch = collator(_make_samples(1))
+        samples = _make_samples(1)
+        batch = collator(samples)
         prompt_len = batch["prompt_lengths"][0].item()
         labels = batch["labels"][0]
         input_ids = batch["input_ids"][0]
-        # Answer positions (non-padding) should match input_ids
-        attn = batch["attention_mask"][0]
-        answer_end = attn.sum().item()
+        answer_end = _real_len(samples[0], prompt_len, real_tokenizer, collator)
         if prompt_len < answer_end:
             assert torch.equal(labels[prompt_len:answer_end], input_ids[prompt_len:answer_end])
 
     def test_eos_appended_after_target(self, real_tokenizer):
-        """EOS token must be appended at the end of target (before padding)."""
+        """EOS token must be appended immediately after target (before padding)."""
         collator = TrainCollator(real_tokenizer, max_length=256)
-        batch = collator(_make_samples(1))
+        samples = _make_samples(1)
+        batch = collator(samples)
         ids = batch["input_ids"][0]
-        attn = batch["attention_mask"][0]
         eos_id = real_tokenizer.eos_token_id
-        real_len = attn.sum().item()
-        # Last real token should be EOS
-        assert ids[real_len - 1].item() == eos_id
+        prompt_len = batch["prompt_lengths"][0].item()
+        target_ids = real_tokenizer.encode(samples[0]["target_text"], add_special_tokens=False)
+        # Position immediately after target content must be the appended EOS
+        eos_pos = prompt_len + len(target_ids)
+        assert ids[eos_pos].item() == eos_id
 
     def test_eos_in_labels(self, real_tokenizer):
-        """EOS token should be part of the answer (labels != -100), not masked."""
+        """EOS token appended after target should be trainable (labels != -100)."""
         collator = TrainCollator(real_tokenizer, max_length=256)
-        batch = collator(_make_samples(1))
+        samples = _make_samples(1)
+        batch = collator(samples)
         labels = batch["labels"][0]
-        attn = batch["attention_mask"][0]
-        real_len = attn.sum().item()
-        # Last real token's label should NOT be -100 (it's trainable EOS)
-        assert labels[real_len - 1].item() != -100
+        prompt_len = batch["prompt_lengths"][0].item()
+        target_ids = real_tokenizer.encode(samples[0]["target_text"], add_special_tokens=False)
+        eos_pos = prompt_len + len(target_ids)
+        assert labels[eos_pos].item() != -100
 
     def test_graph_tag_removal(self, real_tokenizer):
         collator = TrainCollator(real_tokenizer, mol_representation="string_only", max_length=256)
@@ -99,16 +116,17 @@ class TestTrainCollator:
         assert "<GRAPH>" not in decoded
         assert "</GRAPH>" not in decoded
 
-    def test_attention_mask_correct(self, real_tokenizer):
+    def test_attention_mask_is_all_ones(self, real_tokenizer):
+        """LLaDA contract: attention_mask is all-1 for TrainCollator.
+
+        Unlike AR models, LLaDA masked diffusion trains on padding EOS to learn
+        sentence termination, so attention flows to every position including padding.
+        """
         collator = TrainCollator(real_tokenizer, max_length=256)
         batch = collator(_make_samples(2))
-        for i in range(2):
-            attn = batch["attention_mask"][i]
-            ids = batch["input_ids"][i]
-            real_len = attn.sum().item()
-            # All 1s should be contiguous at the start (right-padded)
-            assert (attn[:real_len] == 1).all()
-            assert (attn[real_len:] == 0).all()
+        attn = batch["attention_mask"]
+        assert attn.shape == (2, 256)
+        assert (attn == 1).all()
 
     def test_tasks_preserved(self, real_tokenizer):
         collator = TrainCollator(real_tokenizer, max_length=256)

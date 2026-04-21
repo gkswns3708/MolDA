@@ -146,7 +146,7 @@ def main():
     L(f"- Task: `{tasks[s]}`")
     L(f"- Prompt length: **{plen}** tokens")
     L(f"- Answer length: **{answer_len}** tokens")
-    L(f"- Padding length: **{int(pad_len)}** tokens (EOS, id={128001})")
+    L(f"- Padding length: **{int(pad_len)}** tokens (EOS, id={tokenizer.eos_token_id})")
     L(f"- Total: {plen} (prompt) + {answer_len} (answer) + {int(pad_len)} (pad) = {L_seq}")
     L("")
 
@@ -207,7 +207,7 @@ def main():
             lab_str = "-100" if lab == -100 else str(lab)
             L(f"{pos:5d} | {tid:8d} | {lab_str:>8} | {dec:<{W}} | padding (EOS)")
         if pad_len > pad_show:
-            L(f"  ... ({int(pad_len) - pad_show} more padding tokens, all id={128001})")
+            L(f"  ... ({int(pad_len) - pad_show} more padding tokens, all id={tokenizer.eos_token_id})")
         L(f"```")
         L("")
 
@@ -367,7 +367,7 @@ def main():
       f"{'':>7} | {'':<{TW}} | {'':>11} | {'':>11} | {total_loss_manual:11.6f}")
     L(f"```")
     L("")
-    L(f"- Padding ({int(pad_len)} tokens, all EOS id=128001) 생략")
+    L(f"- Padding ({int(pad_len)} tokens, all EOS id={tokenizer.eos_token_id}) 생략")
     L(f"- **Sample 0 기여도 합계**: {total_loss_manual:.6f}")
     L(f"- **최종 loss** = (Σ all samples) / batch_size = {loss_val.item():.6f}")
     L(f"")

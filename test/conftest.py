@@ -25,6 +25,25 @@ DATASET_ROOT = os.path.join(PROJECT_ROOT, "dataset")
 os.environ.setdefault("HF_HOME", os.path.join(PROJECT_ROOT, "hf-cache"))
 
 
+# ── NLTK resources (caption metrics need punkt_tab + wordnet) ──
+# Downloaded once per test session to avoid LookupError in TestCaptionEvaluate.
+def _ensure_nltk_resources():
+    import nltk
+    required = [
+        ("tokenizers/punkt_tab", "punkt_tab"),
+        ("corpora/wordnet", "wordnet"),
+        ("corpora/omw-1.4", "omw-1.4"),
+    ]
+    for resource_path, download_name in required:
+        try:
+            nltk.data.find(resource_path)
+        except LookupError:
+            nltk.download(download_name, quiet=True)
+
+
+_ensure_nltk_resources()
+
+
 # ── Pytest markers ──
 
 def pytest_configure(config):

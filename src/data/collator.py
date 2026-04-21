@@ -104,6 +104,7 @@ class EvalCollator:
         target_texts = []
         input_mol_strings = []
         prompt_texts = []
+        val_indices = []  # 원본 dataset idx (padding duplicate 식별용)
 
         for sample in batch:
             prompt_text = sample["prompt_text"]
@@ -123,6 +124,8 @@ class EvalCollator:
             target_texts.append(sample["target_text"])
             input_mol_strings.append(sample.get("input_mol_string", ""))
             prompt_texts.append(prompt_text)
+            # _val_idx가 없으면 -1 (sentinel) — downstream dedup에서 fallback
+            val_indices.append(int(sample.get("_val_idx", -1)))
 
         # Left-pad to max prompt length with PAD
         max_prompt_len = max(len(ids) for ids in prompt_ids_list)
@@ -142,4 +145,5 @@ class EvalCollator:
             "target_texts": target_texts,
             "input_mol_strings": input_mol_strings,
             "prompt_texts": prompt_texts,
+            "val_indices": val_indices,
         }
