@@ -21,3 +21,4 @@ docs/
 src/dataset
 .env
 __pycache__/
+.vscode

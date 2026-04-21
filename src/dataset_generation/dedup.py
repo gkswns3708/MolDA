@@ -54,11 +54,25 @@ ENTITY_FAMILIES = {
 # Benchmark compatibility anchor: 중복 시 제거할 task.
 # 이것은 quality superiority rule이 아니라 benchmark compatibility rule이다.
 # SMolInstruct 계열의 evaluation semantics를 중심으로 freeze하기 위한 anchor choice.
+#
+# MOL2TEXT_FAMILY / TEXT2MOL_FAMILY는 의도적으로 제외:
+#   - captioning/generation 데이터셋이 상대적으로 부족하고 학습에 더 많은 iteration이 필요
+#   - ChEBI-20과 SMolInstruct 양쪽 train 샘플을 모두 보존하고자 함
+#   - 단, eval blacklist(test/val에 있는 entity를 train에서 제거)는 family 단위로 여전히 수행
 REMOVE_ON_CONFLICT = {
     "REACTION_FORWARD_FAMILY": "forward_reaction_prediction",
     "REACTION_RETRO_FAMILY": "retrosynthesis",
-    "MOL2TEXT_FAMILY": "chebi-20-mol2text",
-    "TEXT2MOL_FAMILY": "chebi-20-text2mol",
+}
+
+# Family별로 entity key를 어느 컬럼에서 추출할지 정의.
+# text2mol은 input_mol_string="<None>"이고 실제 분자는 label에 저장되므로 label을 쓴다.
+# mol2text는 input_mol_string에 분자가 있으므로 input 사용(현행).
+# reaction family는 input_mol_string에 reaction SMILES가 있으므로 input 사용(현행).
+FAMILY_KEY_SOURCE = {
+    "REACTION_FORWARD_FAMILY": "input_mol_string",
+    "REACTION_RETRO_FAMILY": "input_mol_string",
+    "MOL2TEXT_FAMILY": "input_mol_string",
+    "TEXT2MOL_FAMILY": "label",
 }
 
 # Removal reason codes for audit trail
@@ -103,6 +117,17 @@ def _get_family(task_name):
     return ENTITY_FAMILIES.get(task_name, None)
 
 
+def _get_key_source_field(task_name):
+    """Task에 대해 entity key 추출에 쓸 컬럼명을 반환.
+
+    family에 속하면 FAMILY_KEY_SOURCE 맵 참조, 아니면 기본값 'input_mol_string'.
+    """
+    family = _get_family(task_name)
+    if family is not None:
+        return FAMILY_KEY_SOURCE.get(family, "input_mol_string")
+    return "input_mol_string"
+
+
 # ---------------------------------------------------------------------------
 # Step 1: Eval blacklist
 # ---------------------------------------------------------------------------
@@ -137,12 +162,17 @@ def build_eval_blacklist(task_split_datasets, include_validation=True):
         for task_name, splits in task_split_datasets.items():
             family = _get_family(task_name)
             group_id = family if family is not None else task_name
+            key_field = _get_key_source_field(task_name)
 
             for split_name in eval_splits:
                 ds = splits.get(split_name)
                 if ds is None or len(ds) == 0:
                     continue
-                mol_strings = ds["input_mol_string"]
+                if key_field not in ds.column_names:
+                    # dataset에 해당 컬럼이 없으면 이 task는 건너뜀 (family 오정의 또는 legacy schema)
+                    pbar.update(len(ds))
+                    continue
+                mol_strings = ds[key_field]
                 for mol_str in mol_strings:
                     key = extract_entity_key(mol_str)
                     if key is not None:
@@ -187,6 +217,7 @@ def remove_eval_leakage(task_split_datasets, eval_blacklist, include_validation=
         for task_name, splits in task_split_datasets.items():
             family = _get_family(task_name)
             group_id = family if family is not None else task_name
+            key_field = _get_key_source_field(task_name)
 
             bl = eval_blacklist.get(group_id, set())
 
@@ -196,7 +227,10 @@ def remove_eval_leakage(task_split_datasets, eval_blacklist, include_validation=
                     continue
 
                 before = len(ds)
-                mol_strings = ds["input_mol_string"]
+                if key_field not in ds.column_names:
+                    pbar.update(before)
+                    continue
+                mol_strings = ds[key_field]
 
                 keep_indices = []
                 for i, mol_str in enumerate(mol_strings):
@@ -258,7 +292,10 @@ def dedup_within_family(task_split_datasets):
             train_ds = task_split_datasets[at].get("train")
             if train_ds is None or len(train_ds) == 0:
                 continue
-            for mol_str in tqdm(train_ds["input_mol_string"],
+            at_key_field = _get_key_source_field(at)
+            if at_key_field not in train_ds.column_names:
+                continue
+            for mol_str in tqdm(train_ds[at_key_field],
                                 desc=f"  Step 3: Collecting anchor keys ({at})"):
                 key = extract_entity_key(mol_str)
                 if key is not None:
@@ -273,9 +310,13 @@ def dedup_within_family(task_split_datasets):
         if train_ds is None or len(train_ds) == 0:
             continue
 
+        rm_key_field = _get_key_source_field(remove_task)
+        if rm_key_field not in train_ds.column_names:
+            continue
+
         before = len(train_ds)
         keep_indices = []
-        for i, mol_str in enumerate(tqdm(train_ds["input_mol_string"],
+        for i, mol_str in enumerate(tqdm(train_ds[rm_key_field],
                                           desc=f"  Step 3: Dedup {remove_task} train")):
             key = extract_entity_key(mol_str)
             if key is None or key not in anchor_keys:
