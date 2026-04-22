@@ -3,7 +3,7 @@
 모든 명령은 **`src/` 디렉터리**에서 실행한다.
 
 ```bash
-cd /opt/11-MolDA/New_MolDA/src
+cd /opt/EMNLP_MolDA/New_MolDA/src
 source ../venvs/dataset_gen/bin/activate
 ```
 
@@ -11,33 +11,15 @@ source ../venvs/dataset_gen/bin/activate
 
 ## 1. Full Dataset 생성
 
-### SMILES 표현
-
-```bash
-python -m dataset_generation.run --config smiles --num_workers 16
-```
-
-- Config: `configs/download/smiles.yaml`
-- 출력: `dataset/Raw/SMILES/SMILES_raw_v1/{Train,Val,Test}/`
-
-### SELFIES 표현
-
-```bash
-python -m dataset_generation.run --config selfies --num_workers 16
-```
-
-- Config: `configs/download/selfies.yaml`
-- 출력: `dataset/Raw/SELFIES/SELFIES_raw_v1/{Train,Val,Test}/`
-
-### SMILES + SELFIES 동시 생성 (both)
+Step 3의 `prepare_data_instance`가 한 번의 실행에서 SMILES/SELFIES 컬럼을 함께 생성하므로
+단일 command로 충분하다. (현재 `configs/download/{smiles,selfies,both}.yaml` 세 파일은 내용이 동일하다.)
 
 ```bash
 python -m dataset_generation.run --config both --num_workers 16
 ```
 
 - Config: `configs/download/both.yaml`
-- `mol_representation: ['selfies', 'smiles']` → 각 representation에 대해 순차 실행
-- 출력: `SELFIES/SELFIES_raw_v1/` + `SMILES/SMILES_raw_v1/` 양쪽 모두 생성
+- 출력: `dataset/Raw/raw_v1/{Train,Val,Test}/` (representation별 하위 폴더 없음)
 
 ---
 
@@ -46,17 +28,14 @@ python -m dataset_generation.run --config both --num_workers 16
 각 task별 N개만 sampling하여 축소 데이터셋으로 전체 파이프라인을 실행한다.
 
 ```bash
-# SMILES, task별 100개
-python -m dataset_generation.run --config smiles --toy 100
-
-# SELFIES, task별 5개
-python -m dataset_generation.run --config selfies --toy 5
-
-# Both, task별 100개
+# task별 100개
 python -m dataset_generation.run --config both --toy 100
+
+# task별 5개
+python -m dataset_generation.run --config both --toy 5
 ```
 
-- 출력: `dataset/Raw/SMILES/SMILES_raw_v1_toy100/{Train,Val,Test}/` (data_tag에 `_toyN` 접미사 자동 추가)
+- 출력: `dataset/Raw/raw_v1_toy100/{Train,Val,Test}/` (data_tag에 `_toyN` 접미사 자동 추가)
 
 ---
 
@@ -74,7 +53,7 @@ python -m dataset_generation.run --config both --toy 100
 ## 4. 테스트 실행
 
 ```bash
-cd /opt/11-MolDA/New_MolDA
+cd /opt/EMNLP_MolDA/New_MolDA
 pytest test/test_dedup.py -v
 ```
 
@@ -94,7 +73,9 @@ Step 2 : Cross-Source Decontamination
          4) contamination audit report 출력
 
 Step 3 : Concatenate & Map
-         decontaminated Arrow 파일 → split별 concat → 프롬프트 포맷팅 → 최종 저장
+         decontaminated Arrow 파일 → split별 concat → 프롬프트 포맷팅
+         (SMILES/SELFIES 양쪽 컬럼 동시 생성) → SELFIES 변환 실패 샘플 필터링
+         → 최종 저장
 ```
 
 ---
@@ -102,7 +83,7 @@ Step 3 : Concatenate & Map
 ## 6. 출력 파일 구조
 
 ```
-dataset/Raw/{REPR}/{data_tag}/
+dataset/Raw/{data_tag}/
 ├── {task}_subtask-{idx}_train/   # Step 1 개별 Arrow (decontaminated after Step 2)
 ├── {task}_subtask-{idx}_val/
 ├── {task}_subtask-{idx}_test/
