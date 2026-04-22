@@ -32,10 +32,12 @@ from dataset_generation.utils import (
 )
 from dataset_generation.dedup import (
     ENTITY_FAMILIES,
+    FAMILY_KEY_SOURCE,
     REMOVE_ON_CONFLICT,
     REMOVAL_REASONS,
     RemovalStats,
     _get_family,
+    _get_key_source_field,
     build_eval_blacklist,
     remove_eval_leakage,
     dedup_within_family,
@@ -63,14 +65,39 @@ def _make_rich_dataset(mol_strings, task_name="test_task"):
     })
 
 
-def _collect_keys(ds):
-    """Dataset에서 모든 entity key를 set으로 수집."""
+def _make_text2mol_dataset(mol_labels):
+    """text2mol 스키마: input_mol_string='<None>', label에 <SMILES>분자</SMILES>."""
+    n = len(mol_labels)
+    return datasets.Dataset.from_dict({
+        "input_mol_string": ["<SMILES> <None> </SMILES>"] * n,
+        "label": mol_labels,
+    })
+
+
+def _make_mol2text_dataset(mol_inputs):
+    """mol2text 스키마: input_mol_string에 분자, label은 description."""
+    n = len(mol_inputs)
+    return datasets.Dataset.from_dict({
+        "input_mol_string": mol_inputs,
+        "label": [f"desc_{i}" for i in range(n)],
+    })
+
+
+def _collect_keys(ds, key_field="input_mol_string"):
+    """Dataset에서 모든 entity key를 set으로 수집. family-aware하게 field 지정 가능."""
     keys = set()
-    for mol_str in ds["input_mol_string"]:
+    if key_field not in ds.column_names:
+        return keys
+    for mol_str in ds[key_field]:
         key = extract_entity_key(mol_str)
         if key is not None:
             keys.add(key)
     return keys
+
+
+def _collect_keys_for_task(ds, task_name):
+    """Task에 맞는 key source field로 key를 수집 (FAMILY_KEY_SOURCE 기반)."""
+    return _collect_keys(ds, _get_key_source_field(task_name))
 
 
 # ---------------------------------------------------------------------------
@@ -236,9 +263,17 @@ class TestFamilyMapping:
         assert _get_family("tox21") is None
         assert _get_family("unknown_task") is None
 
-    def test_remove_on_conflict_covers_all_families(self):
+    def test_remove_on_conflict_is_strict_subset_of_families(self):
+        # 정책: MOL2TEXT/TEXT2MOL family는 priority removal 수행 X
+        #       REMOVE_ON_CONFLICT는 모든 family의 엄격한 부분집합이며, 제외는 명시적이다.
         families_with_tasks = set(ENTITY_FAMILIES.values())
-        assert families_with_tasks == set(REMOVE_ON_CONFLICT.keys())
+        assert set(REMOVE_ON_CONFLICT.keys()).issubset(families_with_tasks)
+        # 양 family는 의도적으로 제거 대상에 포함되면 안 됨
+        assert "MOL2TEXT_FAMILY" not in REMOVE_ON_CONFLICT
+        assert "TEXT2MOL_FAMILY" not in REMOVE_ON_CONFLICT
+        # reaction family는 여전히 anchor 기반 priority 유지
+        assert REMOVE_ON_CONFLICT["REACTION_FORWARD_FAMILY"] == "forward_reaction_prediction"
+        assert REMOVE_ON_CONFLICT["REACTION_RETRO_FAMILY"] == "retrosynthesis"
 
     def test_paired_tasks_in_same_family(self):
         # 같은 family에 최소 2개 task가 있어야 dedup 가능
@@ -316,9 +351,10 @@ class TestEvalBlacklist:
         assert len(bl_with_val.get("bace", set())) >= len(bl_without_val.get("bace", set()))
 
     def test_blacklist_none_input_ignored(self):
+        # text2mol family는 label field를 key로 사용 (input_mol_string은 <None>)
         data = {
             "chebi-20-text2mol": {
-                "test": _make_dataset(["<None>", "<SMILES> CCO </SMILES>"]),
+                "test": _make_text2mol_dataset(["<None>", "<SMILES> CCO </SMILES>"]),
             },
         }
         bl = build_eval_blacklist(data, include_validation=False)
@@ -592,7 +628,8 @@ class TestSourcePriorityRule:
         assert get_canonical_smiles("CCCC") in fwd_keys
 
     def test_priority_rule_applies_only_within_same_family(self):
-        # MOL2TEXT_FAMILY overlap이 REACTION_FORWARD_FAMILY에 영향 주면 안 됨
+        # Reaction family 간 독립성 검증: REACTION_FORWARD_FAMILY와 REACTION_RETRO_FAMILY가
+        # 서로 overlap 분자가 있어도 dedup은 각 family 내부에서만 수행돼야 한다.
         shared_mol = "<SMILES> CCO </SMILES>"
         data = {
             # REACTION_FORWARD_FAMILY
@@ -602,19 +639,20 @@ class TestSourcePriorityRule:
             "forward_reaction_prediction": {
                 "train": _make_dataset([shared_mol]),  # CCO는 이 family anchor에 없음
             },
-            # MOL2TEXT_FAMILY
-            "smol-molecule_captioning": {
-                "train": _make_dataset([shared_mol]),  # CCO 존재
+            # REACTION_RETRO_FAMILY
+            "smol-retrosynthesis": {
+                "train": _make_dataset([shared_mol]),  # anchor, CCO 존재
             },
-            "chebi-20-mol2text": {
+            "retrosynthesis": {
                 "train": _make_dataset([shared_mol]),  # CCO 존재 → 제거 대상
             },
         }
         data, _ = dedup_within_family(data)
 
-        # MOL2TEXT에서만 제거 발생
-        assert len(data["chebi-20-mol2text"]["train"]) == 0
-        # REACTION_FORWARD의 forward_reaction_prediction은 변경 없음 (anchor에 CCO 없으므로)
+        # REACTION_RETRO_FAMILY에서만 제거 발생 (retrosynthesis train 0개)
+        assert len(data["retrosynthesis"]["train"]) == 0
+        # REACTION_FORWARD_FAMILY의 forward_reaction_prediction은 변경 없음
+        # (forward family anchor인 smol-forward_synthesis에는 CCO가 없으므로)
         assert len(data["forward_reaction_prediction"]["train"]) == 1
 
     def test_priority_only_compares_train_splits(self):
@@ -908,32 +946,32 @@ class TestEndToEndAcceptance:
                 ]),
                 "test": _make_dataset(["<SMILES> CCO </SMILES>"]),
             },
-            # TEXT2MOL_FAMILY
+            # TEXT2MOL_FAMILY — key source는 label (input_mol_string은 <None>)
             "smol-molecule_generation": {
-                "train": _make_dataset([
-                    "<SMILES> CC </SMILES>",
-                    "<SMILES> CCCO </SMILES>",
+                "train": _make_text2mol_dataset([
+                    "<SMILES>CC</SMILES>",
+                    "<SMILES>CCCO</SMILES>",
                 ]),
-                "test": _make_dataset(["<SMILES> CC </SMILES>"]),
+                "test": _make_text2mol_dataset(["<SMILES>CC</SMILES>"]),
             },
             "chebi-20-text2mol": {
-                "train": _make_dataset([
-                    "<SMILES> CC </SMILES>",  # overlap
-                    "<SMILES> CCCCCCCC </SMILES>",
+                "train": _make_text2mol_dataset([
+                    "<SMILES>CC</SMILES>",  # overlap → eval blacklist로 제거
+                    "<SMILES>CCCCCCCC</SMILES>",
                 ]),
-                "test": _make_dataset(["<SMILES> CC </SMILES>"]),
+                "test": _make_text2mol_dataset(["<SMILES>CC</SMILES>"]),
             },
         }
 
     def _assert_zero_overlap_for_family(self, result, task_names):
-        """family 내 모든 task의 train/test key overlap이 0인지 검증."""
+        """family 내 모든 task의 train/test key overlap이 0인지 검증 (family-aware key source)."""
         train_keys, test_keys = set(), set()
         for task in task_names:
             splits = result.get(task, {})
             if "train" in splits:
-                train_keys |= _collect_keys(splits["train"])
+                train_keys |= _collect_keys_for_task(splits["train"], task)
             if "test" in splits:
-                test_keys |= _collect_keys(splits["test"])
+                test_keys |= _collect_keys_for_task(splits["test"], task)
         overlap = train_keys & test_keys
         assert len(overlap) == 0, f"Leakage in {task_names}: {overlap}"
 
@@ -1083,3 +1121,116 @@ class TestEndToEndAcceptance:
             task: set(splits.keys()) for task, splits in result.items()
         }
         assert original_structure == result_structure
+
+
+# ---------------------------------------------------------------------------
+# Family-specific key-source routing (new contract)
+# ---------------------------------------------------------------------------
+
+class TestKeySourceRouting:
+    def test_family_key_source_map_is_complete(self):
+        # 모든 family가 FAMILY_KEY_SOURCE에 등록되어 있어야 함
+        families = set(ENTITY_FAMILIES.values())
+        assert families.issubset(set(FAMILY_KEY_SOURCE.keys()))
+
+    def test_text2mol_family_uses_label(self):
+        assert _get_key_source_field("chebi-20-text2mol") == "label"
+        assert _get_key_source_field("smol-molecule_generation") == "label"
+
+    def test_mol2text_family_uses_input_mol_string(self):
+        # mol2text는 input_mol_string에 분자가 있음 — 현행 유지
+        assert _get_key_source_field("chebi-20-mol2text") == "input_mol_string"
+        assert _get_key_source_field("smol-molecule_captioning") == "input_mol_string"
+
+    def test_reaction_family_uses_input_mol_string(self):
+        assert _get_key_source_field("forward_reaction_prediction") == "input_mol_string"
+        assert _get_key_source_field("smol-forward_synthesis") == "input_mol_string"
+        assert _get_key_source_field("retrosynthesis") == "input_mol_string"
+        assert _get_key_source_field("smol-retrosynthesis") == "input_mol_string"
+
+    def test_unknown_task_defaults_to_input_mol_string(self):
+        assert _get_key_source_field("bace") == "input_mol_string"
+        assert _get_key_source_field("qm9_homo") == "input_mol_string"
+
+
+class TestText2MolFamilyDedup:
+    def test_blacklist_from_text2mol_test_uses_label(self):
+        # text2mol test의 label에 있는 분자가 blacklist에 들어가야 함
+        data = {
+            "chebi-20-text2mol": {
+                "test": _make_text2mol_dataset(["<SMILES>CCO</SMILES>"]),
+            },
+        }
+        bl = build_eval_blacklist(data, include_validation=False)
+        assert "TEXT2MOL_FAMILY" in bl
+        assert get_canonical_smiles("CCO") in bl["TEXT2MOL_FAMILY"]
+
+    def test_train_removed_when_label_matches_eval(self):
+        # text2mol family: train sample label = test sample label → train 제거
+        data = {
+            "chebi-20-text2mol": {
+                "test": _make_text2mol_dataset(["<SMILES>CCO</SMILES>"]),
+            },
+            "smol-molecule_generation": {
+                "train": _make_text2mol_dataset([
+                    "<SMILES>CCO</SMILES>",   # leaks from chebi test
+                    "<SMILES>CCCC</SMILES>",  # safe
+                ]),
+            },
+        }
+        result = run_decontamination_pipeline(data, include_validation_in_blacklist=False)
+        train_labels = result["smol-molecule_generation"]["train"]["label"]
+        # leaking label removed
+        assert "<SMILES>CCO</SMILES>" not in train_labels
+        # safe label preserved
+        assert "<SMILES>CCCC</SMILES>" in train_labels
+
+    def test_text2mol_no_priority_removal(self):
+        # within-family cross-source priority removal: text2mol은 수행 X
+        # 즉 chebi-20-text2mol train과 smol-molecule_generation train에 같은 분자가 있어도 둘 다 보존
+        data = {
+            "chebi-20-text2mol": {
+                "train": _make_text2mol_dataset(["<SMILES>CCO</SMILES>"]),
+            },
+            "smol-molecule_generation": {
+                "train": _make_text2mol_dataset(["<SMILES>CCO</SMILES>"]),
+            },
+        }
+        result_data, stats = dedup_within_family(data)
+        # 양쪽 모두 유지
+        assert len(result_data["chebi-20-text2mol"]["train"]) == 1
+        assert len(result_data["smol-molecule_generation"]["train"]) == 1
+        # stats에 within_family_dup 사유 제거 기록이 있으면 안 됨
+        total_removed = sum(
+            stats.counts[t][s][r]
+            for t in stats.counts for s in stats.counts[t] for r in stats.counts[t][s]
+        )
+        assert total_removed == 0
+
+    def test_mol2text_no_priority_removal(self):
+        # mol2text 역시 same — ChEBI와 SMol 모두 train에 보존
+        data = {
+            "chebi-20-mol2text": {
+                "train": _make_mol2text_dataset(["<SMILES> CCO </SMILES>"]),
+            },
+            "smol-molecule_captioning": {
+                "train": _make_mol2text_dataset(["<SMILES> CCO </SMILES>"]),
+            },
+        }
+        result_data, stats = dedup_within_family(data)
+        assert len(result_data["chebi-20-mol2text"]["train"]) == 1
+        assert len(result_data["smol-molecule_captioning"]["train"]) == 1
+
+    def test_reaction_priority_still_active(self):
+        # REACTION_FORWARD_FAMILY는 여전히 SMolInstruct anchor 유지
+        data = {
+            "smol-forward_synthesis": {
+                "train": _make_dataset(["<SMILES> CCO </SMILES>"]),  # anchor
+            },
+            "forward_reaction_prediction": {
+                "train": _make_dataset(["<SMILES> CCO </SMILES>"]),  # should be removed
+            },
+        }
+        result_data, stats = dedup_within_family(data)
+        assert len(result_data["smol-forward_synthesis"]["train"]) == 1
+        assert len(result_data["forward_reaction_prediction"]["train"]) == 0

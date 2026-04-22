@@ -12,6 +12,7 @@ from src.training.loss import MaskedDiffusionLoss, MASK_TOKEN_ID, EPS
 def loss_fn(tmp_path):
     return MaskedDiffusionLoss(
         mask_token_id=MASK_TOKEN_ID,
+        eos_token_id=0,  # Source requires a concrete int for per_sample_loss_no_eos path.
         log_nan=True,
         nan_log_dir=str(tmp_path / "nan_logs"),
     )
@@ -82,14 +83,14 @@ class TestForward:
 
     def _make_logits_and_batch(self, batch_size=4, seq_len=32, prompt_len=16, vocab_size=1000):
         input_ids, labels = _make_batch(batch_size, seq_len, prompt_len, vocab_size)
-        loss_fn = MaskedDiffusionLoss()
+        loss_fn = MaskedDiffusionLoss(eos_token_id=0)
         noisy_ids, mask_indices, p_mask = loss_fn.make_noisy(input_ids, labels)
         logits = torch.randn(batch_size, seq_len, vocab_size)
         return logits, input_ids, labels, mask_indices, p_mask
 
     def test_returns_loss_and_answer_length(self):
         logits, input_ids, labels, mask_indices, p_mask = self._make_logits_and_batch()
-        loss_fn = MaskedDiffusionLoss()
+        loss_fn = MaskedDiffusionLoss(eos_token_id=0)
         result = loss_fn(logits, input_ids, labels, mask_indices, p_mask)
         assert "loss" in result
         assert "answer_length_mean" in result
@@ -98,7 +99,7 @@ class TestForward:
 
     def test_loss_is_finite_scalar(self):
         logits, input_ids, labels, mask_indices, p_mask = self._make_logits_and_batch()
-        loss_fn = MaskedDiffusionLoss()
+        loss_fn = MaskedDiffusionLoss(eos_token_id=0)
         result = loss_fn(logits, input_ids, labels, mask_indices, p_mask)
         loss = result["loss"]
         assert loss.shape == ()
@@ -106,13 +107,13 @@ class TestForward:
 
     def test_loss_positive(self):
         logits, input_ids, labels, mask_indices, p_mask = self._make_logits_and_batch()
-        loss_fn = MaskedDiffusionLoss()
+        loss_fn = MaskedDiffusionLoss(eos_token_id=0)
         result = loss_fn(logits, input_ids, labels, mask_indices, p_mask)
         assert result["loss"] > 0
 
     def test_answer_length_mean_correct(self):
         input_ids, labels = _make_batch(batch_size=2, seq_len=32, prompt_len=16)
-        loss_fn = MaskedDiffusionLoss()
+        loss_fn = MaskedDiffusionLoss(eos_token_id=0)
         noisy_ids, mask_indices, p_mask = loss_fn.make_noisy(input_ids, labels)
         logits = torch.randn(2, 32, 1000)
         result = loss_fn(logits, input_ids, labels, mask_indices, p_mask)
@@ -122,14 +123,14 @@ class TestForward:
     def test_per_sample_loss_shape(self):
         B = 4
         logits, input_ids, labels, mask_indices, p_mask = self._make_logits_and_batch(batch_size=B)
-        loss_fn = MaskedDiffusionLoss()
+        loss_fn = MaskedDiffusionLoss(eos_token_id=0)
         result = loss_fn(logits, input_ids, labels, mask_indices, p_mask)
         assert result["per_sample_loss"].shape == (B,)
         assert result["per_sample_loss_no_eos"].shape == (B,)
 
     def test_per_sample_loss_mean_equals_loss(self):
         logits, input_ids, labels, mask_indices, p_mask = self._make_logits_and_batch()
-        loss_fn = MaskedDiffusionLoss()
+        loss_fn = MaskedDiffusionLoss(eos_token_id=0)
         result = loss_fn(logits, input_ids, labels, mask_indices, p_mask)
         assert result["per_sample_loss"].mean().item() == pytest.approx(
             result["loss"].item(), rel=1e-4
@@ -138,7 +139,7 @@ class TestForward:
     def test_loss_no_eos_leq_loss(self):
         """loss_no_eos should generally differ from loss (different normalization)."""
         logits, input_ids, labels, mask_indices, p_mask = self._make_logits_and_batch()
-        loss_fn = MaskedDiffusionLoss()
+        loss_fn = MaskedDiffusionLoss(eos_token_id=0)
         result = loss_fn(logits, input_ids, labels, mask_indices, p_mask)
         # Both should be finite positive
         assert torch.isfinite(result["per_sample_loss_no_eos"]).all()
@@ -147,7 +148,7 @@ class TestForward:
     def test_per_sample_loss_no_grad(self):
         """per_sample_loss tensors should be detached (no grad)."""
         logits, input_ids, labels, mask_indices, p_mask = self._make_logits_and_batch()
-        loss_fn = MaskedDiffusionLoss()
+        loss_fn = MaskedDiffusionLoss(eos_token_id=0)
         result = loss_fn(logits, input_ids, labels, mask_indices, p_mask)
         assert not result["per_sample_loss"].requires_grad
         assert not result["per_sample_loss_no_eos"].requires_grad
@@ -222,7 +223,7 @@ class TestEdgeCases:
         input_ids = torch.randint(0, 100, (B, L))
         labels = torch.full((B, L), -100)
         labels[:, -1] = input_ids[:, -1]  # Only last token is answer
-        loss_fn = MaskedDiffusionLoss()
+        loss_fn = MaskedDiffusionLoss(eos_token_id=0)
         noisy_ids, mask_indices, p_mask = loss_fn.make_noisy(input_ids, labels)
         logits = torch.randn(B, L, 100)
         result = loss_fn(logits, input_ids, labels, mask_indices, p_mask)
@@ -230,7 +231,7 @@ class TestEdgeCases:
 
     def test_batch_size_one(self):
         input_ids, labels = _make_batch(batch_size=1)
-        loss_fn = MaskedDiffusionLoss()
+        loss_fn = MaskedDiffusionLoss(eos_token_id=0)
         noisy_ids, mask_indices, p_mask = loss_fn.make_noisy(input_ids, labels)
         logits = torch.randn(1, 32, 1000)
         result = loss_fn(logits, input_ids, labels, mask_indices, p_mask)

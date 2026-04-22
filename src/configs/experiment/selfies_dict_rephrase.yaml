@@ -1,37 +1,30 @@
 # @package _global_
 # ───────────────────────────────────────────────────
-# Experiment: SELFIES + molecular dictionary, raw_v1_10x_rephrase dataset
+# Experiment: SELFIES + molecular dictionary on raw_v1_10x_rephrase
+# Train = 10x rephrase, Val/Test = raw_v1 복사본
 # ───────────────────────────────────────────────────
 # Usage:
-#   python scripts/train.py +experiment=selfies_dict_rephrase trainer=stage1 \
-#       hardware.devices='0,1,2,3,4,5' training.global_batch_size=1080
-#   python scripts/train.py +experiment=selfies_dict_rephrase trainer=stage2 \
-#       pretrained_ckpt_path=./checkpoint/selfies_dict_rephrase/stage1/last.ckpt
+#   python scripts/train.py +experiment=selfies_dict_rephrase trainer=stage1
 
 defaults:
-  - override /data: raw_v1
-
-model:
-  weight_tying: true
+  - override /data: raw_v1_10x_rephrase
 
 tokenizer:
   mol_token_type: selfies
   add_mol_dict: true
 
-data:
-  tag: raw_v1_10x_rephrase
-  root: raw_v1_10x_rephrase
-
 wandb:
   enabled: true
-  entity: hj_ai
   project: MolDA_pro6000
   run_name: selfies_dict_rephrase_s${stage}
   tags: [selfies, dict, raw_v1_10x_rephrase]
   group: selfies_dict_rephrase
-  log_freq: 3
-  watch_model: false
-  log_model: false
 
 logging:
   dir: ./checkpoint/selfies_dict_rephrase/stage${stage}
+
+training:
+  max_epochs: 20
+  batch_size: 18
+  global_batch_size: 1080 
+

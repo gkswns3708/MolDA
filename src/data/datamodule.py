@@ -109,12 +109,16 @@ class MolDADataModule(pl.LightningDataModule):
             mol_representation=self.cfg.model.mol_representation,
             max_length=self.cfg.data.max_length,
         )
+        # drop_last=False: DDP에서도 Lightning DistributedSampler가 padding으로
+        # rank별 batch 수를 맞춰주므로 hang 없음. partial batch까지 포함해
+        # 전체 val sample을 metric 계산에 사용 (중복 padding 2~)는 Async
+        # aggregation에서 dedup하지 않지만 영향은 미미).
         return DataLoader(
             self.val_dataset,
             batch_size=self.cfg.validation.get("inference_batch_size",
                                                 self.cfg.training.batch_size),
             shuffle=False,
-            drop_last=True,
+            drop_last=False,
             num_workers=self.cfg.hardware.num_workers,
             pin_memory=True,
             collate_fn=collator,

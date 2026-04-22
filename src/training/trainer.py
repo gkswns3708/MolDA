@@ -225,8 +225,21 @@ class MolDATrainer(OptimizerMixin, ValidationMixin, CheckpointMixin, pl.Lightnin
         torch.cuda.empty_cache()
         print(f"[Rank {self.global_rank}] train_epoch_start: DONE", flush=True)
 
-    def on_train_end(self):
-        """학습 종료 시 버퍼에 남은 metric flush."""
+    def on_train_epoch_end(self):
+        """Epoch 종료 시 버퍼에 남은 metric flush.
+
+        on_train_end에서는 self.log() 사용 금지(Lightning 제약).
+        epoch 끝이 훅 체인 상 on_train_end 직전이라 여기서 마지막 flush 처리.
+        """
         if self._metric_buffer:
             self._flush_metrics()
+
+    def on_train_end(self):
+        """학습 종료 — self.log() 금지 구역. 잔여 버퍼가 있으면 조용히 버림.
+
+        정상 경로에서는 on_train_epoch_end에서 이미 flush되어 버퍼가 비어있음.
+        예외 경로로 잔여가 있으면 logger.experiment로 직접 기록해도 되지만,
+        단순화를 위해 버퍼만 clear.
+        """
+        self._metric_buffer.clear()
 

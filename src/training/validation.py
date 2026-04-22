@@ -61,8 +61,14 @@ class ValidationMixin:
 
     def _load_all_val_predictions(self, tag: str,
                                    epoch: int = None, step: int = None) -> list:
-        """Rank 0: 모든 rank의 JSONL 파일을 로드하여 병합."""
+        """Rank 0: 모든 rank의 JSONL 파일을 로드하여 병합 + padding duplicate dedup.
+
+        (val_idx, strategy) key로 unique. DDP DistributedSampler가 dataset을
+        world_size 배수로 padding할 때 발생하는 중복 제거.
+        """
         records = []
+        seen_keys = set()
+        dup_count = 0
         world_size = self.trainer.world_size
         for rank in range(world_size):
             path = self._val_jsonl_path(tag, rank=rank, epoch=epoch, step=step)
@@ -71,8 +77,19 @@ class ValidationMixin:
             with open(path, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
-                    if line:
-                        records.append(json.loads(line))
+                    if not line:
+                        continue
+                    rec = json.loads(line)
+                    vidx = rec.get("val_idx", -1)
+                    if vidx >= 0:
+                        key = (vidx, rec.get("strategy", ""))
+                        if key in seen_keys:
+                            dup_count += 1
+                            continue
+                        seen_keys.add(key)
+                    records.append(rec)
+        if dup_count:
+            logger.info(f"dedup: removed {dup_count} padding-duplicate records for tag={tag}")
         return records
 
     def _cleanup_val_jsonl(self, tag: str,
@@ -94,7 +111,20 @@ class ValidationMixin:
 
     @staticmethod
     def _load_all_val_predictions_static(log_dir, world_size, tag, epoch, step):
+        """JSONL들을 로드 + (val_idx, strategy) 기준 dedup.
+
+        DDP DistributedSampler가 dataset을 world_size 배수로 padding할 때 앞쪽
+        sample 일부가 rank에 중복 등장. 각 sample에 원본 _val_idx가 기록되어
+        있으므로 (val_idx, strategy) key로 중복 제거. 같은 sample이 여러 rank에
+        기록돼도 첫 번째만 keep.
+
+        - classification: strategy 없음 → val_idx만으로 유일
+        - generation: strategy 포함 (strategy별 별도 prediction 보존)
+        - val_idx == -1 (sentinel): dedup 불가 → 그대로 keep (레거시 호환)
+        """
         records = []
+        seen_keys = set()
+        dup_count = 0
         for rank in range(world_size):
             path = ValidationMixin._jsonl_path_static(log_dir, tag, rank, epoch, step)
             if not os.path.exists(path):
@@ -102,8 +132,23 @@ class ValidationMixin:
             with open(path, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
-                    if line:
-                        records.append(json.loads(line))
+                    if not line:
+                        continue
+                    rec = json.loads(line)
+                    vidx = rec.get("val_idx", -1)
+                    if vidx >= 0:
+                        key = (vidx, rec.get("strategy", ""))
+                        if key in seen_keys:
+                            dup_count += 1
+                            continue
+                        seen_keys.add(key)
+                    records.append(rec)
+        if dup_count:
+            print(
+                f"[Async] dedup: removed {dup_count} padding-duplicate records "
+                f"for tag={tag}",
+                flush=True,
+            )
         return records
 
     @staticmethod
@@ -300,11 +345,25 @@ class ValidationMixin:
         target_texts = batch["target_texts"]
         input_mol_strings = batch.get("input_mol_strings", [""] * len(tasks))
         prompt_texts = batch.get("prompt_texts", [""] * len(tasks))
+        val_indices = batch.get("val_indices", [-1] * len(tasks))
 
         # Split by task type
         cls_idx = [i for i, t in enumerate(tasks) if t in CLASSIFICATION_TASKS]
         gen_idx = [i for i, t in enumerate(tasks)
                    if t not in CLASSIFICATION_TASKS and t not in NAME_CONVERSION_TASKS]
+
+        # ── Coverage debug: trace which (rank, batch_idx) got processed ──
+        _cov_trace = os.environ.get("MOLDA_COV_TRACE") == "1"
+        if _cov_trace:
+            from collections import Counter as _C
+            _task_counts = dict(_C(tasks))
+            print(
+                f"[COV rank={self.global_rank} batch={batch_idx}] "
+                f"size={len(tasks)} cls={len(cls_idx)} gen={len(gen_idx)} "
+                f"skipped={len(tasks) - len(cls_idx) - len(gen_idx)} "
+                f"tasks={_task_counts}",
+                flush=True,
+            )
 
         # --- Classification: likelihood scoring ---
         if cls_idx:
@@ -317,14 +376,27 @@ class ValidationMixin:
             cls_tasks = [tasks[i] for i in cls_idx]
             # Write to JSONL (per-rank, per-sample)
             probs_cpu = probs.cpu()
+            _cls_written = 0
+            _cls_failed = []
             for i, ci in enumerate(cls_idx):
-                self._write_jsonl(self._val_cls_fh, {
-                    "task": tasks[ci],
-                    "probs": probs_cpu[i].tolist(),
-                    "label": target_texts[ci],
-                    "input_mol_string": input_mol_strings[ci],
-                    "prompt_text": prompt_texts[ci],
-                })
+                try:
+                    self._write_jsonl(self._val_cls_fh, {
+                        "val_idx": int(val_indices[ci]),
+                        "task": tasks[ci],
+                        "probs": probs_cpu[i].tolist(),
+                        "label": target_texts[ci],
+                        "input_mol_string": input_mol_strings[ci],
+                        "prompt_text": prompt_texts[ci],
+                    })
+                    _cls_written += 1
+                except Exception as _e:
+                    _cls_failed.append((tasks[ci], type(_e).__name__, str(_e)[:100]))
+            if _cov_trace or _cls_failed:
+                print(
+                    f"[COV rank={self.global_rank} batch={batch_idx}] "
+                    f"cls_written={_cls_written}/{len(cls_idx)} failed={_cls_failed}",
+                    flush=True,
+                )
 
         # --- Generation: diffusion sampling (remasking × sampling 전략 조합) ---
         if gen_idx:
@@ -387,27 +459,54 @@ class ValidationMixin:
                 pred_texts = self.tokenizer.batch_decode(gen_part, skip_special_tokens=False)
 
                 # Write to JSONL (per-rank, per-sample)
+                _written = 0
+                _failed = []
                 for i in range(len(gen_tasks)):
-                    self._write_jsonl(self._val_gen_fh, {
-                        "task": gen_tasks[i],
-                        "strategy": strategy_key,
-                        "pred_text": pred_texts[i],
-                        "label_text": gen_labels[i],
-                        "input_mol_string": input_mol_strings[gen_idx[i]],
-                        "prompt_text": prompt_texts[gen_idx[i]],
-                    })
+                    try:
+                        self._write_jsonl(self._val_gen_fh, {
+                            "val_idx": int(val_indices[gen_idx[i]]),
+                            "task": gen_tasks[i],
+                            "strategy": strategy_key,
+                            "pred_text": pred_texts[i],
+                            "label_text": gen_labels[i],
+                            "input_mol_string": input_mol_strings[gen_idx[i]],
+                            "prompt_text": prompt_texts[gen_idx[i]],
+                        })
+                        _written += 1
+                    except Exception as _e:
+                        _failed.append((gen_tasks[i], type(_e).__name__, str(_e)[:100]))
+                if _cov_trace or _failed:
+                    print(
+                        f"[COV rank={self.global_rank} batch={batch_idx} "
+                        f"strategy={strategy_key}] gen_written={_written}/"
+                        f"{len(gen_tasks)} failed={_failed}",
+                        flush=True,
+                    )
 
     def on_validation_epoch_end(self):
         print(f"[Rank {self.global_rank}] epoch_end: START", flush=True)
 
         # ── 1. Close JSONL files (모든 rank) ──
-        if self._val_cls_fh:
-            self._val_cls_fh.close()
-            self._val_cls_fh = None
-        if self._val_gen_fh:
-            self._val_gen_fh.close()
-            self._val_gen_fh = None
+        import os as _os
+        for fh_attr in ("_val_cls_fh", "_val_gen_fh"):
+            fh = getattr(self, fh_attr)
+            if fh:
+                fh.flush()
+                try:
+                    _os.fsync(fh.fileno())  # OS 버퍼까지 flush (타 rank read 안전)
+                except (OSError, ValueError):
+                    pass
+                fh.close()
+                setattr(self, fh_attr, None)
         print(f"[Rank {self.global_rank}] epoch_end: files closed", flush=True)
+
+        # ── 1.5. Barrier: 모든 rank의 close가 완료된 후 async 진행 ──
+        # 미동기 시 rank 0 async thread가 다른 rank의 partial JSONL을 읽는 race.
+        if self.trainer.world_size > 1:
+            import torch.distributed as dist
+            if dist.is_available() and dist.is_initialized():
+                dist.barrier()
+        print(f"[Rank {self.global_rank}] epoch_end: barrier passed", flush=True)
 
         # ── 2. Rank 0: 비동기 스레드로 metric 계산 시작 ──
         # 주의: self.trainer.log_dir은 내부적으로 broadcast()를 호출하므로
