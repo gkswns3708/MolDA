@@ -183,11 +183,14 @@ def classification_evaluate(probs: "torch.Tensor", label_texts: List[str],
 
     gt_labels = []
     valid_indices = []
+    failure_idxs = []
     for i, text in enumerate(label_texts):
         parsed = _parse_boolean_tag(text)
         if parsed is not None:
             gt_labels.append(1 if parsed else 0)
             valid_indices.append(i)
+        else:
+            failure_idxs.append(i)
 
     failure_rate = 1.0 - len(valid_indices) / len(label_texts) if len(label_texts) > 0 else 0.0
 
@@ -199,6 +202,7 @@ def classification_evaluate(probs: "torch.Tensor", label_texts: List[str],
             "recall": float("nan"),
             "roc_auc": float("nan"),
             "failure_rate": failure_rate,
+            "_failure_indices": failure_idxs,
         }
 
     gt = np.array(gt_labels)
@@ -223,6 +227,7 @@ def classification_evaluate(probs: "torch.Tensor", label_texts: List[str],
         "recall": rec,
         "roc_auc": roc_auc,
         "failure_rate": failure_rate,
+        "_failure_indices": failure_idxs,
     }
 
 
@@ -272,7 +277,8 @@ def regression_evaluate(pred_texts: List[str], label_texts: List[str],
 
     if n_valid == 0:
         return {"mae": float("inf"), "mse": float("inf"), "rmse": float("inf"),
-                "failure_rate": len(failure_idxs) / n_total if n_total > 0 else 0.0}
+                "failure_rate": len(failure_idxs) / n_total if n_total > 0 else 0.0,
+                "_failure_indices": failure_idxs}
 
     preds = np.array(preds)
     gts = np.array(gts)
@@ -286,6 +292,7 @@ def regression_evaluate(pred_texts: List[str], label_texts: List[str],
         "mse": mse,
         "rmse": rmse,
         "failure_rate": len(failure_idxs) / n_total if n_total > 0 else 0.0,
+        "_failure_indices": failure_idxs,
     }
 
 
@@ -477,6 +484,7 @@ def molecule_evaluate(pred_texts: List[str], label_texts: List[str],
         "bleu_smiles": float(bleu_smiles),
         "bleu_selfies": float(bleu_selfies),
         "failure_rate": len(failure_idxs) / n_total if n_total > 0 else 0.0,
+        "_failure_indices": failure_idxs,
     }
 
 
@@ -560,6 +568,7 @@ def caption_evaluate(pred_texts: List[str], label_texts: List[str],
                 pattern = matching_pattern
                 break
         if pattern is None:
+            failure_idxs.append(i)
             continue
 
         # Parse reference
@@ -673,6 +682,7 @@ def caption_evaluate(pred_texts: List[str], label_texts: List[str],
         "rouge2": rouge2,
         "rougeL": rougeL,
         "failure_rate": failure_rate,
+        "_failure_indices": failure_idxs,
     }
 
     # Add METEOR keys based on selected options

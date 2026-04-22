@@ -114,6 +114,27 @@ class ValidationMixin:
                 os.remove(path)
 
     @staticmethod
+    def _save_failed_per_task_static(log_dir, task, strategy, epoch, step, records):
+        """실패 샘플을 {log_dir}/val_predictions/failed/{task}/ 아래에 JSON으로 저장."""
+        if not records:
+            return
+        fail_dir = os.path.join(log_dir, "val_predictions", "failed", task)
+        os.makedirs(fail_dir, exist_ok=True)
+        filename = f"epoch{epoch}_step{step}_{strategy or 'cls'}.json"
+        path = os.path.join(fail_dir, filename)
+        payload = {
+            "task": task,
+            "strategy": strategy,
+            "epoch": epoch,
+            "global_step": step,
+            "num_failed": len(records),
+            "failed_samples": records,
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        logger.info(f"Saved {len(records)} failed samples → {path}")
+
+    @staticmethod
     def _save_final_predictions_static(log_dir, cls_data, gen_data, epoch, step):
         pred_dir = os.path.join(log_dir, "val_predictions")
         os.makedirs(pred_dir, exist_ok=True)
@@ -367,22 +388,30 @@ class ValidationMixin:
             val_metrics = {}
 
             # --- Classification metrics ---
-            cls_by_task = defaultdict(lambda: {"probs": [], "labels": []})
+            cls_by_task = defaultdict(lambda: {"probs": [], "labels": [], "records": []})
             for item in cls_data:
                 cls_by_task[item["task"]]["probs"].append(item["probs"])
                 cls_by_task[item["task"]]["labels"].append(item["label"])
+                cls_by_task[item["task"]]["records"].append(item)
 
             for task, data in cls_by_task.items():
                 all_probs = torch.tensor(data["probs"])
                 metrics = classification_evaluate(all_probs, data["labels"], task)
+                failure_idxs = metrics.pop("_failure_indices", [])
                 for k, v in metrics.items():
                     val_metrics[f"val/{task}/{k}"] = v
+                if failure_idxs:
+                    failed_records = [data["records"][i] for i in failure_idxs]
+                    self._save_failed_per_task_static(
+                        log_dir, task, None, epoch, step, failed_records)
 
             # --- Generation metrics (strategy별 분리) ---
-            gen_by_key = defaultdict(lambda: {"preds": [], "labels": []})
+            gen_by_key = defaultdict(lambda: {"preds": [], "labels": [], "records": []})
             for item in gen_data:
-                gen_by_key[(item["task"], item["strategy"])]["preds"].append(item["pred_text"])
-                gen_by_key[(item["task"], item["strategy"])]["labels"].append(item["label_text"])
+                key = (item["task"], item["strategy"])
+                gen_by_key[key]["preds"].append(item["pred_text"])
+                gen_by_key[key]["labels"].append(item["label_text"])
+                gen_by_key[key]["records"].append(item)
 
             for (task, strategy), data in gen_by_key.items():
                 task_type = get_task_type(task)
@@ -397,8 +426,13 @@ class ValidationMixin:
                 else:
                     continue
 
+                failure_idxs = metrics.pop("_failure_indices", [])
                 for k, v in metrics.items():
                     val_metrics[f"val/{task}/{strategy}/{k}"] = v
+                if failure_idxs:
+                    failed_records = [data["records"][i] for i in failure_idxs]
+                    self._save_failed_per_task_static(
+                        log_dir, task, strategy, epoch, step, failed_records)
 
             # 직접 logger 호출 (self.log() 대신 — thread-safe)
             print(f"[Async] computing metrics done, logging {len(val_metrics)} metrics...", flush=True)
