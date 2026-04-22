@@ -113,6 +113,90 @@ class ValidationMixin:
             if os.path.exists(path):
                 os.remove(path)
 
+    def _update_val_chart_history(self, task: str, metric_name: str,
+                                   strategy: str, epoch: int, value):
+        """Strategy 비교 line_series 차트용 누적 history 업데이트.
+
+        History 구조: {(task, metric): {"epochs": [E0, E1, ...],
+                                        "strategies": {strategy_name: [v0, v1, ...]}}}
+        서로 다른 strategy의 길이를 epoch 배열 기준으로 NaN padding하여 맞춘다.
+        """
+        key = (task, metric_name)
+        hist = self._val_custom_chart_history.setdefault(
+            key, {"epochs": [], "strategies": {}}
+        )
+        if not hist["epochs"] or hist["epochs"][-1] != epoch:
+            hist["epochs"].append(epoch)
+            for vals in hist["strategies"].values():
+                while len(vals) < len(hist["epochs"]) - 1:
+                    vals.append(float("nan"))
+        if strategy not in hist["strategies"]:
+            hist["strategies"][strategy] = [float("nan")] * (len(hist["epochs"]) - 1)
+        v = value.item() if hasattr(value, "item") else float(value)
+        # 현재 epoch 값을 기록 (이미 있으면 마지막 값을 덮어씀)
+        vals = hist["strategies"][strategy]
+        if len(vals) == len(hist["epochs"]):
+            vals[-1] = v
+        else:
+            vals.append(v)
+
+    def _log_strategy_comparison_charts(self, loggers, step: int):
+        """strategy 2개 이상인 (task, metric)마다 wandb.plot.line_series로 line 비교 차트 로깅."""
+        try:
+            import wandb
+        except ImportError:
+            return
+        wandb_logger = None
+        for lg in loggers:
+            if type(lg).__name__ == "WandbLogger":
+                wandb_logger = lg
+                break
+        if wandb_logger is None:
+            return
+
+        for (task, metric_name), hist in self._val_custom_chart_history.items():
+            if len(hist["strategies"]) < 2:
+                continue
+            # strategy별 ys 길이를 epochs 길이에 맞춤
+            n_epochs = len(hist["epochs"])
+            ys = []
+            keys = []
+            for s_name, vals in hist["strategies"].items():
+                padded = list(vals) + [float("nan")] * (n_epochs - len(vals))
+                ys.append(padded)
+                keys.append(s_name)
+            chart = wandb.plot.line_series(
+                xs=hist["epochs"],
+                ys=ys,
+                keys=keys,
+                title=f"{task} — {metric_name}",
+                xname="epoch",
+            )
+            wandb_logger.experiment.log(
+                {f"val_chart/{metric_name}/{task}": chart}, step=step
+            )
+
+    @staticmethod
+    def _save_failed_per_task_static(log_dir, task, strategy, epoch, step, records):
+        """실패 샘플을 {log_dir}/val_predictions/failed/{task}/ 아래에 JSON으로 저장."""
+        if not records:
+            return
+        fail_dir = os.path.join(log_dir, "val_predictions", "failed", task)
+        os.makedirs(fail_dir, exist_ok=True)
+        filename = f"epoch{epoch}_step{step}_{strategy or 'cls'}.json"
+        path = os.path.join(fail_dir, filename)
+        payload = {
+            "task": task,
+            "strategy": strategy,
+            "epoch": epoch,
+            "global_step": step,
+            "num_failed": len(records),
+            "failed_samples": records,
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        logger.info(f"Saved {len(records)} failed samples → {path}")
+
     @staticmethod
     def _save_final_predictions_static(log_dir, cls_data, gen_data, epoch, step):
         pred_dir = os.path.join(log_dir, "val_predictions")
@@ -367,22 +451,30 @@ class ValidationMixin:
             val_metrics = {}
 
             # --- Classification metrics ---
-            cls_by_task = defaultdict(lambda: {"probs": [], "labels": []})
+            cls_by_task = defaultdict(lambda: {"probs": [], "labels": [], "records": []})
             for item in cls_data:
                 cls_by_task[item["task"]]["probs"].append(item["probs"])
                 cls_by_task[item["task"]]["labels"].append(item["label"])
+                cls_by_task[item["task"]]["records"].append(item)
 
             for task, data in cls_by_task.items():
                 all_probs = torch.tensor(data["probs"])
                 metrics = classification_evaluate(all_probs, data["labels"], task)
+                failure_idxs = metrics.pop("_failure_indices", [])
                 for k, v in metrics.items():
-                    val_metrics[f"val/{task}/{k}"] = v
+                    val_metrics[f"val/{k}/{task}"] = v
+                if failure_idxs:
+                    failed_records = [data["records"][i] for i in failure_idxs]
+                    self._save_failed_per_task_static(
+                        log_dir, task, None, epoch, step, failed_records)
 
             # --- Generation metrics (strategy별 분리) ---
-            gen_by_key = defaultdict(lambda: {"preds": [], "labels": []})
+            gen_by_key = defaultdict(lambda: {"preds": [], "labels": [], "records": []})
             for item in gen_data:
-                gen_by_key[(item["task"], item["strategy"])]["preds"].append(item["pred_text"])
-                gen_by_key[(item["task"], item["strategy"])]["labels"].append(item["label_text"])
+                key = (item["task"], item["strategy"])
+                gen_by_key[key]["preds"].append(item["pred_text"])
+                gen_by_key[key]["labels"].append(item["label_text"])
+                gen_by_key[key]["records"].append(item)
 
             for (task, strategy), data in gen_by_key.items():
                 task_type = get_task_type(task)
@@ -397,8 +489,15 @@ class ValidationMixin:
                 else:
                     continue
 
+                failure_idxs = metrics.pop("_failure_indices", [])
                 for k, v in metrics.items():
-                    val_metrics[f"val/{task}/{strategy}/{k}"] = v
+                    val_metrics[f"val/{k}/{task}/{strategy}"] = v
+                    # strategy 비교 custom chart history 업데이트
+                    self._update_val_chart_history(task, k, strategy, epoch, v)
+                if failure_idxs:
+                    failed_records = [data["records"][i] for i in failure_idxs]
+                    self._save_failed_per_task_static(
+                        log_dir, task, strategy, epoch, step, failed_records)
 
             # 직접 logger 호출 (self.log() 대신 — thread-safe)
             print(f"[Async] computing metrics done, logging {len(val_metrics)} metrics...", flush=True)
@@ -408,6 +507,9 @@ class ValidationMixin:
             for lg in loggers:
                 lg.log_metrics(flat, step=step)
             print(f"[Async] logger.log_metrics done", flush=True)
+
+            # Strategy 비교 custom chart (wandb line_series) 로깅
+            self._log_strategy_comparison_charts(loggers, step)
 
             # 영구 prediction 저장
             print(f"[Async] saving predictions...", flush=True)

@@ -145,7 +145,7 @@ logging:
   weight_norm_interval: 10
   # train prediction logging (masked position별 예측 상세)
   log_train_predictions: true              # train prediction metrics (accuracy, target_prob) on/off
-  train_prediction_log_interval: 10       # 상세 sample log 간격 (global steps)
+  train_prediction_log_interval: 1000     # 상세 sample log 간격 (global steps)
   train_prediction_max_positions: 512       # 상세 로그에 포함할 최대 position 수
   # NaN 발생 시 sample index, input_ids, task 기록
   log_nan_details: true

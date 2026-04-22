@@ -50,6 +50,14 @@ class MolDATrainer(OptimizerMixin, ValidationMixin, CheckpointMixin, pl.Lightnin
         # flush 시점에 구간 평균을 self.log()로 기록
         self._metric_buffer: dict[str, dict] = {}
 
+        # Masking-ratio bucket edges for per-bucket accuracy logging
+        # bucket i covers p_mask in [edges[i], edges[i+1])
+        self._mask_ratio_bucket_edges = torch.tensor([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
+        self._bucket_labels = ["0.0-0.2", "0.2-0.4", "0.4-0.6", "0.6-0.8", "0.8-1.0"]
+
+        # Validation strategy-wise custom chart history (populated by ValidationMixin)
+        self._val_custom_chart_history: dict = {}
+
     @property
     def tokenizer(self):
         return self.model.tokenizer
@@ -103,11 +111,13 @@ class MolDATrainer(OptimizerMixin, ValidationMixin, CheckpointMixin, pl.Lightnin
         self._accumulate("train/loss_no_eos", out["per_sample_loss_no_eos"].mean(), sync_dist=True)
         self._accumulate("train/answer_length_mean", out["answer_length_mean"], sync_dist=True)
 
-        # Per-task loss 누적 (sync_dist=False: tasks may differ across ranks)
+        # Per-task loss / mask_accuracy 누적 (sync_dist=False: tasks may differ across ranks)
         tasks = batch.get("tasks", [])
         if tasks:
             per_sample_loss = out["per_sample_loss"]
             per_sample_loss_no_eos = out["per_sample_loss_no_eos"]
+            per_sample_acc = out.get("per_sample_mask_accuracy")
+            per_sample_acc_no_eos = out.get("per_sample_mask_accuracy_no_eos")
             seen = set()
             for task in tasks:
                 if task in seen:
@@ -118,12 +128,38 @@ class MolDATrainer(OptimizerMixin, ValidationMixin, CheckpointMixin, pl.Lightnin
                 )
                 self._accumulate(f"train/{task}/loss", per_sample_loss[mask].mean(), sync_dist=False)
                 self._accumulate(f"train/{task}/loss_no_eos", per_sample_loss_no_eos[mask].mean(), sync_dist=False)
+                if per_sample_acc is not None:
+                    self._accumulate(
+                        f"train/{task}/mask_accuracy",
+                        per_sample_acc[mask].mean(),
+                        sync_dist=False,
+                    )
+                    self._accumulate(
+                        f"train/{task}/mask_accuracy_no_eos",
+                        per_sample_acc_no_eos[mask].mean(),
+                        sync_dist=False,
+                    )
 
         # Prediction quality metrics 누적
         if "mask_accuracy" in out:
             self._accumulate("train/mask_accuracy", out["mask_accuracy"], sync_dist=True)
             self._accumulate("train/mask_accuracy_no_eos", out["mask_accuracy_no_eos"], sync_dist=True)
             self._accumulate("train/target_prob_mean", out["target_prob_mean"], sync_dist=True)
+
+        # Masking-ratio bucket별 mask accuracy 누적 (전역 — task 무관)
+        if "p_mask_per_sample" in out and "per_sample_mask_accuracy" in out:
+            p_mask_vec = out["p_mask_per_sample"]                        # [B]
+            acc_vec = out["per_sample_mask_accuracy"]                    # [B]
+            inner_edges = self._mask_ratio_bucket_edges[1:-1].to(p_mask_vec.device)
+            bucket_ids = torch.bucketize(p_mask_vec, inner_edges)        # [B] in [0..4]
+            for b_idx in range(len(self._bucket_labels)):
+                sel = (bucket_ids == b_idx)
+                if sel.any():
+                    self._accumulate(
+                        f"train/mask_acc/bucket_{self._bucket_labels[b_idx]}",
+                        acc_vec[sel].mean(),
+                        sync_dist=False,
+                    )
 
         # Detailed prediction sample log (periodic, step당 1번만 — should_log 내부에서 중복 방지)
         if "_train_sample_detail" in out and self._train_pred_logger:
