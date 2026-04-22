@@ -1,0 +1,37 @@
+# @package _global_
+# ───────────────────────────────────────────────────
+# Experiment: SELFIES + molecular dictionary, raw_v1_10x_rephrase dataset
+# ───────────────────────────────────────────────────
+# Usage:
+#   python scripts/train.py +experiment=selfies_dict_rephrase trainer=stage1 \
+#       hardware.devices='0,1,2,3,4,5' training.global_batch_size=1080
+#   python scripts/train.py +experiment=selfies_dict_rephrase trainer=stage2 \
+#       pretrained_ckpt_path=./checkpoint/selfies_dict_rephrase/stage1/last.ckpt
+
+defaults:
+  - override /data: raw_v1
+
+model:
+  weight_tying: true
+
+tokenizer:
+  mol_token_type: selfies
+  add_mol_dict: true
+
+data:
+  tag: raw_v1_10x_rephrase
+  root: raw_v1_10x_rephrase
+
+wandb:
+  enabled: true
+  entity: hj_ai
+  project: MolDA_pro6000
+  run_name: selfies_dict_rephrase_s${stage}
+  tags: [selfies, dict, raw_v1_10x_rephrase]
+  group: selfies_dict_rephrase
+  log_freq: 3
+  watch_model: false
+  log_model: false
+
+logging:
+  dir: ./checkpoint/selfies_dict_rephrase/stage${stage}

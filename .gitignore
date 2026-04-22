@@ -16,3 +16,6 @@ docs/
 *.zip
 src/dataset
 .env
+__pycache__/
+.vscode/
+src/ipynb/
