@@ -129,8 +129,11 @@ class MaskedDiffusionLoss(nn.Module):
 
             per_sample_loss = weighted.sum(dim=1) / answer_lengths.squeeze(1)  # [B]
 
-            # EOS mask: answer region 내 모든 EOS 토큰 위치
-            eos_mask = (input_ids == self.eos_token_id) & answer_mask  # [B, L]
+            # EOS mask: answer region 내 모든 EOS 토큰 위치 (eos_token_id=None이면 EOS 없음)
+            if self.eos_token_id is not None:
+                eos_mask = (input_ids == self.eos_token_id) & answer_mask  # [B, L]
+            else:
+                eos_mask = torch.zeros_like(answer_mask, dtype=torch.bool)
             eos_counts = eos_mask.sum(dim=1)  # [B]
 
             # Loss excluding all EOS tokens, re-normalized by content length
@@ -146,8 +149,11 @@ class MaskedDiffusionLoss(nn.Module):
 
             mask_accuracy = (pred_tokens == masked_targets).float().mean().item()
 
-            # EOS 제외 accuracy
-            eos_at_masked = (masked_targets == self.eos_token_id)
+            # EOS 제외 accuracy (eos_token_id=None이면 모든 위치를 non-EOS로 간주)
+            if self.eos_token_id is not None:
+                eos_at_masked = (masked_targets == self.eos_token_id)
+            else:
+                eos_at_masked = torch.zeros_like(masked_targets, dtype=torch.bool)
             non_eos_mask = ~eos_at_masked
             if non_eos_mask.any():
                 mask_accuracy_no_eos = (pred_tokens[non_eos_mask] == masked_targets[non_eos_mask]).float().mean().item()
