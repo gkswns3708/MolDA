@@ -154,6 +154,20 @@ class MaskedDiffusionLoss(nn.Module):
             else:
                 mask_accuracy_no_eos = 0.0
 
+            # Per-sample accuracy: scatter correctness back to [B, L] then aggregate per row
+            per_token_correct = (pred_tokens == masked_targets).float()  # [N_masked]
+            correct_bl = torch.zeros(b, l, device=device)
+            correct_bl[mask_indices] = per_token_correct
+            n_masked_per_sample = mask_indices.sum(dim=1).clamp(min=1)   # [B]
+            per_sample_mask_accuracy = correct_bl.sum(dim=1) / n_masked_per_sample
+
+            # Per-sample accuracy excluding EOS targets
+            non_eos_bl = torch.zeros(b, l, dtype=torch.bool, device=device)
+            non_eos_bl[mask_indices] = non_eos_mask
+            correct_no_eos_bl = correct_bl * non_eos_bl.float()
+            n_non_eos_per_sample = non_eos_bl.sum(dim=1).clamp(min=1)    # [B]
+            per_sample_mask_accuracy_no_eos = correct_no_eos_bl.sum(dim=1) / n_non_eos_per_sample
+
             log_probs = F.log_softmax(masked_logits, dim=-1)
             target_log_probs = log_probs.gather(
                 1, masked_targets.unsqueeze(1)
@@ -165,6 +179,9 @@ class MaskedDiffusionLoss(nn.Module):
             "answer_length_mean": answer_lengths.mean().item(),
             "per_sample_loss": per_sample_loss,
             "per_sample_loss_no_eos": per_sample_loss_no_eos,
+            "per_sample_mask_accuracy": per_sample_mask_accuracy,
+            "per_sample_mask_accuracy_no_eos": per_sample_mask_accuracy_no_eos,
+            "p_mask_per_sample": p_mask.squeeze(1),
             "mask_accuracy": mask_accuracy,
             "mask_accuracy_no_eos": mask_accuracy_no_eos,
             "target_prob_mean": target_prob_mean,
