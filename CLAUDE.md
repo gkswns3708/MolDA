@@ -114,3 +114,7 @@ New_MolDA/
 - Stage별 학습 설정 → `docs/STAGE_TRAINING.md`
 - 테스트 파일 가이드 → `docs/TESTING.md`
 - **소스 코드 점검 사항 → `docs/KNOWN_ISSUES.md`** — 테스트에서 발견된 불일치/의심 항목. 전체 수정·리팩토링 시 반드시 참고하여 해당 소스 코드를 확인할 것.
+
+## Git 커밋 규칙
+- 커밋 메시지에 `Co-Authored-By: Claude ...` (또는 그 외 Claude 귀속 trailer) 라인을 **넣지 않는다**.
+- 그 외 커밋 스타일은 프로젝트 관례(conventional commits 등) 유지.
