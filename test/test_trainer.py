@@ -64,3 +64,52 @@ class TestCheckpointFiltering:
         trainer_module.on_save_checkpoint(checkpoint)
         embed_keys = [k for k in checkpoint["state_dict"] if "wte" in k or "embed" in k]
         assert len(embed_keys) > 0, "No embedding keys in checkpoint"
+
+
+# ─────────────────────────────────────────────
+# Masking-ratio bucket logging (CPU — no GPU required)
+# ─────────────────────────────────────────────
+
+class TestMaskRatioBucketLogging:
+    """training_step의 bucket 집계 루프가 bucket edges와 일관되는지 검증."""
+
+    BUCKET_EDGES = torch.tensor([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
+    BUCKET_LABELS = ["0.0-0.2", "0.2-0.4", "0.4-0.6", "0.6-0.8", "0.8-1.0"]
+
+    def _bucketize(self, p_mask_vec):
+        inner_edges = self.BUCKET_EDGES[1:-1]
+        return torch.bucketize(p_mask_vec, inner_edges)
+
+    def test_boundary_values_land_in_expected_bucket(self):
+        # torch.bucketize(right=False) with inner_edges=[0.2, 0.4, 0.6, 0.8]:
+        # bucket 0 = (-inf, 0.2], bucket 1 = (0.2, 0.4], ..., bucket 4 = (0.8, +inf)
+        # i.e. value == edge → 왼쪽 bucket에 포함된다 (ties go left).
+        p = torch.tensor([0.0, 0.19, 0.2, 0.39, 0.4, 0.99, 1.0])
+        ids = self._bucketize(p)
+        assert ids.tolist() == [0, 0, 0, 1, 1, 4, 4]
+
+    def test_every_sample_mapped_to_exactly_one_bucket(self):
+        p = torch.rand(128)
+        ids = self._bucketize(p)
+        assert ids.shape == (128,)
+        assert (ids >= 0).all() and (ids < 5).all()
+
+    def test_bucket_label_count_matches_edges(self):
+        assert len(self.BUCKET_LABELS) == len(self.BUCKET_EDGES) - 1
+
+
+# ─────────────────────────────────────────────
+# Config reflection — train_prediction_log_interval 기본값
+# ─────────────────────────────────────────────
+
+class TestConfigTrainPredictionLogInterval:
+    """default.yaml에서 train_prediction_log_interval이 1000으로 반영되어 있는지."""
+
+    def test_default_is_1000(self):
+        from pathlib import Path
+        import yaml
+        cfg_path = Path(__file__).resolve().parent.parent / "src" / "configs" / "trainer" / "default.yaml"
+        text = cfg_path.read_text(encoding="utf-8")
+        # @package _global_ 헤더 때문에 yaml.safe_load로 전체 파싱
+        data = yaml.safe_load(text)
+        assert data["logging"]["train_prediction_log_interval"] == 1000

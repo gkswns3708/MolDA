@@ -153,6 +153,68 @@ class TestForward:
         assert not result["per_sample_loss_no_eos"].requires_grad
 
 
+class TestPerSampleMaskAccuracy:
+    """Tests for per_sample_mask_accuracy / _no_eos / p_mask_per_sample outputs (관측용)."""
+
+    def _forward(self, batch_size=4, seq_len=32, prompt_len=16, vocab_size=1000,
+                 eos_token_id=None):
+        input_ids, labels = _make_batch(batch_size, seq_len, prompt_len, vocab_size)
+        loss_fn = MaskedDiffusionLoss(eos_token_id=eos_token_id)
+        noisy_ids, mask_indices, p_mask = loss_fn.make_noisy(input_ids, labels)
+        logits = torch.randn(batch_size, seq_len, vocab_size)
+        return loss_fn, logits, input_ids, labels, mask_indices, p_mask
+
+    def test_output_shapes(self):
+        B = 4
+        loss_fn, logits, input_ids, labels, mask_indices, p_mask = self._forward(batch_size=B)
+        result = loss_fn(logits, input_ids, labels, mask_indices, p_mask)
+        assert result["per_sample_mask_accuracy"].shape == (B,)
+        assert result["per_sample_mask_accuracy_no_eos"].shape == (B,)
+        assert result["p_mask_per_sample"].shape == (B,)
+
+    def test_per_sample_accuracy_in_unit_range(self):
+        loss_fn, logits, input_ids, labels, mask_indices, p_mask = self._forward()
+        result = loss_fn(logits, input_ids, labels, mask_indices, p_mask)
+        acc = result["per_sample_mask_accuracy"]
+        assert (acc >= 0.0).all() and (acc <= 1.0).all()
+
+    def test_p_mask_per_sample_in_unit_range(self):
+        loss_fn, logits, input_ids, labels, mask_indices, p_mask = self._forward()
+        result = loss_fn(logits, input_ids, labels, mask_indices, p_mask)
+        pm = result["p_mask_per_sample"]
+        assert (pm > 0.0).all() and (pm <= 1.0).all()
+
+    def test_perfect_prediction_gives_accuracy_one(self):
+        """정답 토큰을 확실히 맞추도록 logits를 고정하면 accuracy == 1.0."""
+        B, L, V = 2, 12, 30
+        input_ids = torch.randint(0, V, (B, L))
+        labels = input_ids.clone()
+        labels[:, :6] = -100
+        loss_fn = MaskedDiffusionLoss()
+        _, mask_indices, p_mask = loss_fn.make_noisy(input_ids, labels)
+        # 정답 토큰 위치에만 매우 큰 logit 부여
+        logits = torch.full((B, L, V), -10.0)
+        for b in range(B):
+            for t in range(L):
+                logits[b, t, input_ids[b, t]] = 10.0
+        result = loss_fn(logits, input_ids, labels, mask_indices, p_mask)
+        assert torch.allclose(result["per_sample_mask_accuracy"], torch.ones(B))
+
+    def test_wrong_prediction_gives_accuracy_zero(self):
+        """항상 틀린 토큰을 예측하도록 하면 accuracy == 0.0."""
+        B, L, V = 2, 12, 30
+        input_ids = torch.randint(0, V - 1, (B, L))  # target 토큰은 V-1 미만
+        labels = input_ids.clone()
+        labels[:, :6] = -100
+        loss_fn = MaskedDiffusionLoss()
+        _, mask_indices, p_mask = loss_fn.make_noisy(input_ids, labels)
+        # 모든 위치에서 마지막 vocab(V-1) argmax → 절대 정답과 일치하지 않음
+        logits = torch.full((B, L, V), -10.0)
+        logits[..., V - 1] = 10.0
+        result = loss_fn(logits, input_ids, labels, mask_indices, p_mask)
+        assert torch.allclose(result["per_sample_mask_accuracy"], torch.zeros(B))
+
+
 class TestEdgeCases:
 
     def test_single_token_answer(self):
