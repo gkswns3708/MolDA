@@ -62,6 +62,17 @@ class MolDATrainer(OptimizerMixin, ValidationMixin, CheckpointMixin, pl.Lightnin
     def tokenizer(self):
         return self.model.tokenizer
 
+    # test_step reuses validation_step: Test loop produces the same
+    # JSONL + failure/prediction artifacts as validation.
+    def test_step(self, batch, batch_idx):
+        return self.validation_step(batch, batch_idx)
+
+    def on_test_epoch_start(self):
+        return self.on_validation_epoch_start()
+
+    def on_test_epoch_end(self):
+        return self.on_validation_epoch_end()
+
     # ─────────────────────────────────────────
     # Training — metric 구간 평균
     # ─────────────────────────────────────────

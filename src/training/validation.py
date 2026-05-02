@@ -186,7 +186,13 @@ class ValidationMixin:
             vals.append(v)
 
     def _log_strategy_comparison_charts(self, loggers, step: int):
-        """strategy 2개 이상인 (task, metric)마다 wandb.plot.line_series로 line 비교 차트 로깅."""
+        """strategy 2개 이상인 (task, metric)마다 wandb.plot.line_series로 line 비교 차트 로깅.
+
+        Chart 직렬화는 `/tmp/tmp*wandb-media/` 임시 경로에 파일을 쓰는데, 이 디렉터리가
+        (a) 외부 /tmp cleanup, (b) async thread에서 stale run 접근, (c) run 재초기화로
+        인해 사라져 있으면 FileNotFoundError가 난다. Chart 실패가 뒤의 prediction 저장을
+        막지 않도록 각 chart 호출을 격리하고, media tempdir은 호출 직전에 복구한다.
+        """
         try:
             import wandb
         except ImportError:
@@ -199,27 +205,42 @@ class ValidationMixin:
         if wandb_logger is None:
             return
 
+        # wandb media tempdir이 없으면 복구(없으면 bind_to_run에서 FileNotFoundError)
+        try:
+            run = wandb_logger.experiment
+            media_dir = getattr(run, "_settings", None)
+            media_dir = getattr(media_dir, "_tmp_dir", None) if media_dir else None
+            if media_dir and not os.path.isdir(str(media_dir)):
+                os.makedirs(str(media_dir), exist_ok=True)
+        except Exception as e:
+            logger.warning(f"[charts] media tempdir check skipped: {e}")
+
         for (task, metric_name), hist in self._val_custom_chart_history.items():
             if len(hist["strategies"]) < 2:
                 continue
-            # strategy별 ys 길이를 epochs 길이에 맞춤
-            n_epochs = len(hist["epochs"])
-            ys = []
-            keys = []
-            for s_name, vals in hist["strategies"].items():
-                padded = list(vals) + [float("nan")] * (n_epochs - len(vals))
-                ys.append(padded)
-                keys.append(s_name)
-            chart = wandb.plot.line_series(
-                xs=hist["epochs"],
-                ys=ys,
-                keys=keys,
-                title=f"{task} — {metric_name}",
-                xname="epoch",
-            )
-            wandb_logger.experiment.log(
-                {f"val_chart/{metric_name}/{task}": chart}, step=step
-            )
+            try:
+                # strategy별 ys 길이를 epochs 길이에 맞춤
+                n_epochs = len(hist["epochs"])
+                ys = []
+                keys = []
+                for s_name, vals in hist["strategies"].items():
+                    padded = list(vals) + [float("nan")] * (n_epochs - len(vals))
+                    ys.append(padded)
+                    keys.append(s_name)
+                chart = wandb.plot.line_series(
+                    xs=hist["epochs"],
+                    ys=ys,
+                    keys=keys,
+                    title=f"{task} — {metric_name}",
+                    xname="epoch",
+                )
+                wandb_logger.experiment.log(
+                    {f"val_chart/{metric_name}/{task}": chart}, step=step
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[charts] skip val_chart/{metric_name}/{task}: {e}"
+                )
 
     @staticmethod
     def _save_failed_per_task_static(log_dir, task, strategy, epoch, step, records):
@@ -607,10 +628,7 @@ class ValidationMixin:
                 lg.log_metrics(flat, step=step)
             print(f"[Async] logger.log_metrics done", flush=True)
 
-            # Strategy 비교 custom chart (wandb line_series) 로깅
-            self._log_strategy_comparison_charts(loggers, step)
-
-            # 영구 prediction 저장
+            # 영구 prediction 저장 (chart 로깅 실패에 영향받지 않도록 먼저 수행)
             print(f"[Async] saving predictions...", flush=True)
             self._save_final_predictions_static(
                 log_dir, cls_data, gen_data, epoch, step)
@@ -618,7 +636,14 @@ class ValidationMixin:
             # Cleanup temp JSONL
             self._cleanup_val_jsonl_static(log_dir, world_size, "cls", epoch, step)
             self._cleanup_val_jsonl_static(log_dir, world_size, "gen", epoch, step)
-            print(f"[Async] ALL DONE (predictions saved, JSONL cleaned)", flush=True)
+            print(f"[Async] predictions saved, JSONL cleaned", flush=True)
+
+            # Strategy 비교 custom chart (wandb line_series) 로깅 — 실패 시 경고만
+            try:
+                self._log_strategy_comparison_charts(loggers, step)
+            except Exception as e:
+                logger.warning(f"[Async] chart logging failed (ignored): {e}")
+            print(f"[Async] ALL DONE", flush=True)
         except Exception as e:
             print(f"[Async] FAILED: {e}", flush=True)
             logger.error(f"[Async] Validation metric processing failed: {e}", exc_info=True)

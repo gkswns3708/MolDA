@@ -14,6 +14,14 @@ logger = logging.getLogger(__name__)
 class CheckpointMixin:
     """Checkpoint 저장 시 trainable params만 보존하는 Mixin."""
 
+    # Checkpoints only contain trainable params (frozen base weights stripped in
+    # on_save_checkpoint). On load, default Lightning strict=True would fail because
+    # the base-model keys are present in the live module but absent from the ckpt.
+    # The base weights come from the HF model load during model init, so dropping
+    # strict is safe for test/validate/resume flows alike.
+    def load_state_dict(self, state_dict, strict=True, *args, **kwargs):
+        return super().load_state_dict(state_dict, strict=False, *args, **kwargs)
+
     def on_save_checkpoint(self, checkpoint):
         to_remove = []
         for key in checkpoint["state_dict"]:
