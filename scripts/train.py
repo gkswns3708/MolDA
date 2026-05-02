@@ -32,6 +32,15 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
 torch.set_float32_matmul_precision("medium")
 
+# PyTorch 2.6+: default weights_only=True blocks OmegaConf-pickled hparams.
+# Our ckpts are our own trusted artifacts, so hard-force weights_only=False
+# even when callers (Lightning) explicitly pass weights_only=True.
+_orig_torch_load = torch.load
+def _trusted_torch_load(*args, **kwargs):
+    kwargs["weights_only"] = False
+    return _orig_torch_load(*args, **kwargs)
+torch.load = _trusted_torch_load
+
 import hydra
 import pytorch_lightning as pl
 from omegaconf import DictConfig, OmegaConf
@@ -86,6 +95,7 @@ def main(cfg: DictConfig):
             every_n_epochs=cfg.logging.save_every_n_epochs,
             save_top_k=-1,
             save_last=True,
+            save_on_train_epoch_end=True,  # validation 안 도는 epoch에서도 저장 (중도 종료 시 손실 방지)
         ),
     ]
 
