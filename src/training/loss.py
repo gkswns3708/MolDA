@@ -129,8 +129,11 @@ class MaskedDiffusionLoss(nn.Module):
 
             per_sample_loss = weighted.sum(dim=1) / answer_lengths.squeeze(1)  # [B]
 
-            # EOS mask: answer region 내 모든 EOS 토큰 위치
-            eos_mask = (input_ids == self.eos_token_id) & answer_mask  # [B, L]
+            # EOS mask: answer region 내 모든 EOS 토큰 위치 (eos_token_id=None이면 EOS 없음)
+            if self.eos_token_id is not None:
+                eos_mask = (input_ids == self.eos_token_id) & answer_mask  # [B, L]
+            else:
+                eos_mask = torch.zeros_like(answer_mask, dtype=torch.bool)
             eos_counts = eos_mask.sum(dim=1)  # [B]
 
             # Loss excluding all EOS tokens, re-normalized by content length
@@ -146,13 +149,30 @@ class MaskedDiffusionLoss(nn.Module):
 
             mask_accuracy = (pred_tokens == masked_targets).float().mean().item()
 
-            # EOS 제외 accuracy
-            eos_at_masked = (masked_targets == self.eos_token_id)
+            # EOS 제외 accuracy (eos_token_id=None이면 모든 위치를 non-EOS로 간주)
+            if self.eos_token_id is not None:
+                eos_at_masked = (masked_targets == self.eos_token_id)
+            else:
+                eos_at_masked = torch.zeros_like(masked_targets, dtype=torch.bool)
             non_eos_mask = ~eos_at_masked
             if non_eos_mask.any():
                 mask_accuracy_no_eos = (pred_tokens[non_eos_mask] == masked_targets[non_eos_mask]).float().mean().item()
             else:
                 mask_accuracy_no_eos = 0.0
+
+            # Per-sample accuracy: scatter correctness back to [B, L] then aggregate per row
+            per_token_correct = (pred_tokens == masked_targets).float()  # [N_masked]
+            correct_bl = torch.zeros(b, l, device=device)
+            correct_bl[mask_indices] = per_token_correct
+            n_masked_per_sample = mask_indices.sum(dim=1).clamp(min=1)   # [B]
+            per_sample_mask_accuracy = correct_bl.sum(dim=1) / n_masked_per_sample
+
+            # Per-sample accuracy excluding EOS targets
+            non_eos_bl = torch.zeros(b, l, dtype=torch.bool, device=device)
+            non_eos_bl[mask_indices] = non_eos_mask
+            correct_no_eos_bl = correct_bl * non_eos_bl.float()
+            n_non_eos_per_sample = non_eos_bl.sum(dim=1).clamp(min=1)    # [B]
+            per_sample_mask_accuracy_no_eos = correct_no_eos_bl.sum(dim=1) / n_non_eos_per_sample
 
             log_probs = F.log_softmax(masked_logits, dim=-1)
             target_log_probs = log_probs.gather(
@@ -165,6 +185,9 @@ class MaskedDiffusionLoss(nn.Module):
             "answer_length_mean": answer_lengths.mean().item(),
             "per_sample_loss": per_sample_loss,
             "per_sample_loss_no_eos": per_sample_loss_no_eos,
+            "per_sample_mask_accuracy": per_sample_mask_accuracy,
+            "per_sample_mask_accuracy_no_eos": per_sample_mask_accuracy_no_eos,
+            "p_mask_per_sample": p_mask.squeeze(1),
             "mask_accuracy": mask_accuracy,
             "mask_accuracy_no_eos": mask_accuracy_no_eos,
             "target_prob_mean": target_prob_mean,

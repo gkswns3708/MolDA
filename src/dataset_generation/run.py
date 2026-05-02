@@ -183,19 +183,31 @@ def run_step1(cfg, task_subtask_pairs, step1_root, num_workers, toy_n):
 
 
 def load_step1_task_datasets(task_subtask_pairs, step1_root):
-    """step1/에서 {task → {split → Dataset}} 구조로 로드."""
+    """step1/에서 {task → {split → Dataset}} 구조로 로드.
+
+    경로가 아예 없는 split은 정상 skip하지만(예: name_conversion-*의 val/test),
+    경로가 있는데 load_from_disk가 실패하면 fail-fast. 과거에는 silent skip이라
+    `List` vs `Sequence` 같은 포맷 불일치로 task 전체가 step2에서 증발해도 모르고
+    넘어가는 사고가 있었다.
+    """
     out = {}
     for task, subtask_idx in task_subtask_pairs:
         splits = {}
         for split in ["train", "val", "test"]:
             path = os.path.join(step1_root, task_arrow_name(task, subtask_idx, split))
-            if os.path.exists(path):
-                try:
-                    ds = datasets.Dataset.load_from_disk(path)
-                    if len(ds) > 0:
-                        splits[split] = ds
-                except Exception as e:
-                    print(f"[Warning] Failed to load {path}: {e}")
+            if not os.path.exists(path):
+                continue
+            try:
+                ds = datasets.Dataset.load_from_disk(path)
+            except Exception as e:
+                raise RuntimeError(
+                    f"[Step 2] Failed to load step1 arrow: {path}\n"
+                    f"  → datasets library 호환성 점검 필요 "
+                    f"(e.g. 'List' vs 'Sequence' feature type). "
+                    f"Original error: {e!r}"
+                ) from e
+            if len(ds) > 0:
+                splits[split] = ds
         if splits:
             out[task] = splits
     return out
@@ -221,6 +233,17 @@ def run_step2(task_subtask_pairs, step1_root, step2_root, tag_root):
     os.makedirs(step2_root, exist_ok=True)
 
     task_split_datasets = load_step1_task_datasets(task_subtask_pairs, step1_root)
+
+    # Configured target_benchmarks와 실제 로드된 task 집합을 비교해 누락 즉시 차단.
+    configured_tasks = {t for (t, _) in task_subtask_pairs}
+    loaded_tasks = set(task_split_datasets.keys())
+    missing = configured_tasks - loaded_tasks
+    if missing:
+        raise RuntimeError(
+            f"[Step 2] Configured tasks missing from step1 load: {sorted(missing)}.\n"
+            f"  → step1 디렉터리 존재 여부와 dataset_info.json 포맷을 확인하세요."
+        )
+
     task_split_datasets = run_decontamination_pipeline(task_split_datasets)
 
     # step2/에 저장 (atomic: tmp → rename)

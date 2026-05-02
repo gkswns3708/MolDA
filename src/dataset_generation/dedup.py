@@ -53,15 +53,16 @@ ENTITY_FAMILIES = {
 
 # Benchmark compatibility anchor: 중복 시 제거할 task.
 # 이것은 quality superiority rule이 아니라 benchmark compatibility rule이다.
-# SMolInstruct 계열의 evaluation semantics를 중심으로 freeze하기 위한 anchor choice.
+# family별로 "해당 분야의 standard benchmark"를 anchor로 선택한다.
 #
-# MOL2TEXT_FAMILY / TEXT2MOL_FAMILY는 의도적으로 제외:
-#   - captioning/generation 데이터셋이 상대적으로 부족하고 학습에 더 많은 iteration이 필요
-#   - ChEBI-20과 SMolInstruct 양쪽 train 샘플을 모두 보존하고자 함
-#   - 단, eval blacklist(test/val에 있는 entity를 train에서 제거)는 family 단위로 여전히 수행
+# - REACTION families : SMolInstruct anchor (larger 코퍼스, current SOTA benchmark).
+# - MOL2TEXT/TEXT2MOL : ChEBI-20 anchor (field-standard captioning/generation
+#                      benchmark; train set이 작아 전량 보존 필요).
 REMOVE_ON_CONFLICT = {
     "REACTION_FORWARD_FAMILY": "forward_reaction_prediction",
     "REACTION_RETRO_FAMILY": "retrosynthesis",
+    "MOL2TEXT_FAMILY": "smol-molecule_captioning",
+    "TEXT2MOL_FAMILY": "smol-molecule_generation",
 }
 
 # Family별로 entity key를 어느 컬럼에서 추출할지 정의.

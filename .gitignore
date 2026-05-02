@@ -21,4 +21,6 @@ docs/
 src/dataset
 .env
 __pycache__/
-.vscode
+.vscode/
+src/ipynb/
+wandb/

@@ -263,17 +263,16 @@ class TestFamilyMapping:
         assert _get_family("tox21") is None
         assert _get_family("unknown_task") is None
 
-    def test_remove_on_conflict_is_strict_subset_of_families(self):
-        # 정책: MOL2TEXT/TEXT2MOL family는 priority removal 수행 X
-        #       REMOVE_ON_CONFLICT는 모든 family의 엄격한 부분집합이며, 제외는 명시적이다.
+    def test_remove_on_conflict_covers_all_families(self):
+        # 정책: 4개 family 모두 priority removal 수행.
+        #       - REACTION families : SMolInstruct anchor, Mol-Instruction remove
+        #       - MOL2TEXT/TEXT2MOL : ChEBI-20 anchor, SMolInstruct remove
         families_with_tasks = set(ENTITY_FAMILIES.values())
-        assert set(REMOVE_ON_CONFLICT.keys()).issubset(families_with_tasks)
-        # 양 family는 의도적으로 제거 대상에 포함되면 안 됨
-        assert "MOL2TEXT_FAMILY" not in REMOVE_ON_CONFLICT
-        assert "TEXT2MOL_FAMILY" not in REMOVE_ON_CONFLICT
-        # reaction family는 여전히 anchor 기반 priority 유지
+        assert set(REMOVE_ON_CONFLICT.keys()) == families_with_tasks
         assert REMOVE_ON_CONFLICT["REACTION_FORWARD_FAMILY"] == "forward_reaction_prediction"
         assert REMOVE_ON_CONFLICT["REACTION_RETRO_FAMILY"] == "retrosynthesis"
+        assert REMOVE_ON_CONFLICT["MOL2TEXT_FAMILY"] == "smol-molecule_captioning"
+        assert REMOVE_ON_CONFLICT["TEXT2MOL_FAMILY"] == "smol-molecule_generation"
 
     def test_paired_tasks_in_same_family(self):
         # 같은 family에 최소 2개 task가 있어야 dedup 가능
@@ -1185,41 +1184,54 @@ class TestText2MolFamilyDedup:
         # safe label preserved
         assert "<SMILES>CCCC</SMILES>" in train_labels
 
-    def test_text2mol_no_priority_removal(self):
-        # within-family cross-source priority removal: text2mol은 수행 X
-        # 즉 chebi-20-text2mol train과 smol-molecule_generation train에 같은 분자가 있어도 둘 다 보존
+    def test_text2mol_priority_removes_smol(self):
+        # within-family cross-source priority removal: text2mol에서 ChEBI-20 anchor.
+        # chebi-20-text2mol train과 smol-molecule_generation train에 같은 분자가
+        # 있으면 smol 쪽에서 제거.
         data = {
             "chebi-20-text2mol": {
                 "train": _make_text2mol_dataset(["<SMILES>CCO</SMILES>"]),
             },
             "smol-molecule_generation": {
-                "train": _make_text2mol_dataset(["<SMILES>CCO</SMILES>"]),
+                "train": _make_text2mol_dataset([
+                    "<SMILES>CCO</SMILES>",   # overlap with chebi → 제거
+                    "<SMILES>CCCC</SMILES>",  # safe
+                ]),
             },
         }
         result_data, stats = dedup_within_family(data)
-        # 양쪽 모두 유지
+        # chebi anchor 유지
         assert len(result_data["chebi-20-text2mol"]["train"]) == 1
+        # smol에서 overlap 제거
         assert len(result_data["smol-molecule_generation"]["train"]) == 1
-        # stats에 within_family_dup 사유 제거 기록이 있으면 안 됨
-        total_removed = sum(
-            stats.counts[t][s][r]
-            for t in stats.counts for s in stats.counts[t] for r in stats.counts[t][s]
-        )
-        assert total_removed == 0
+        remaining = result_data["smol-molecule_generation"]["train"]["label"]
+        assert "<SMILES>CCCC</SMILES>" in remaining
+        assert "<SMILES>CCO</SMILES>" not in remaining
+        # within_family_dup 통계에 1건 기록
+        assert stats.counts["smol-molecule_generation"]["train"]["within_family_dup"] == 1
 
-    def test_mol2text_no_priority_removal(self):
-        # mol2text 역시 same — ChEBI와 SMol 모두 train에 보존
+    def test_mol2text_priority_removes_smol(self):
+        # mol2text 역시 ChEBI-20 anchor, smol-molecule_captioning이 제거 대상
         data = {
             "chebi-20-mol2text": {
                 "train": _make_mol2text_dataset(["<SMILES> CCO </SMILES>"]),
             },
             "smol-molecule_captioning": {
-                "train": _make_mol2text_dataset(["<SMILES> CCO </SMILES>"]),
+                "train": _make_mol2text_dataset([
+                    "<SMILES> CCO </SMILES>",   # overlap with chebi → 제거
+                    "<SMILES> CCCC </SMILES>",  # safe
+                ]),
             },
         }
         result_data, stats = dedup_within_family(data)
+        # chebi anchor 유지
         assert len(result_data["chebi-20-mol2text"]["train"]) == 1
+        # smol에서 overlap 제거
         assert len(result_data["smol-molecule_captioning"]["train"]) == 1
+        remaining_keys = _collect_keys(result_data["smol-molecule_captioning"]["train"])
+        assert get_canonical_smiles("CCCC") in remaining_keys
+        assert get_canonical_smiles("CCO") not in remaining_keys
+        assert stats.counts["smol-molecule_captioning"]["train"]["within_family_dup"] == 1
 
     def test_reaction_priority_still_active(self):
         # REACTION_FORWARD_FAMILY는 여전히 SMolInstruct anchor 유지

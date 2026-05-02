@@ -8,7 +8,7 @@ stage: 1
 # ─────────────────────────────────────────────
 hardware:
   accelerator: gpu
-  devices: "0,1,2,3,4,5,6,7"
+  devices: "0,1,2,3,4,5"
   precision: bf16-mixed
   num_workers: 0
   # 각 stage별 별도 실행 + freeze 정책으로 requires_grad=False 설정하므로 불필요
@@ -108,7 +108,7 @@ data:
 # LLaDA Generation
 # ─────────────────────────────────────────────
 generation:
-  remasking_strategy: ['low_confidence', 'random']   # low_confidence | random
+  remasking_strategy: ['low_confidence']   # low_confidence
   sampling_steps: 32
   # validation 시 비교할 sampling 전략 목록
   val_strategies: [random, semi_ar]
@@ -145,7 +145,7 @@ logging:
   weight_norm_interval: 10
   # train prediction logging (masked position별 예측 상세)
   log_train_predictions: true              # train prediction metrics (accuracy, target_prob) on/off
-  train_prediction_log_interval: 10       # 상세 sample log 간격 (global steps)
+  train_prediction_log_interval: 1000     # 상세 sample log 간격 (global steps)
   train_prediction_max_positions: 512       # 상세 로그에 포함할 최대 position 수
   # NaN 발생 시 sample index, input_ids, task 기록
   log_nan_details: true

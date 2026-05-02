@@ -144,7 +144,8 @@ class TestTaskCategorization:
 
 class TestClassificationEvaluate:
 
-    EXPECTED_KEYS = {"accuracy", "f1", "precision", "recall", "roc_auc", "failure_rate"}
+    EXPECTED_KEYS = {"accuracy", "f1", "precision", "recall", "roc_auc",
+                     "failure_rate", "_failure_indices"}
 
     def test_perfect_accuracy(self):
         probs = torch.tensor([[0.1, 0.9], [0.8, 0.2]])  # [P(F), P(T)]
@@ -448,7 +449,7 @@ class TestCaptionEvaluate:
         text = "<DESCRIPTION>A test molecule.</DESCRIPTION>"
         result = caption_evaluate([text], [text], "chebi-20-mol2text")
         expected_keys = {"bleu2", "bleu4", "meteor", "meteor_wordnet", "meteor_llada",
-                         "rouge1", "rouge2", "rougeL", "failure_rate"}
+                         "rouge1", "rouge2", "rougeL", "failure_rate", "_failure_indices"}
         assert set(result.keys()) == expected_keys
 
     def test_auto_detect_description_tag(self):
@@ -618,3 +619,103 @@ class TestValJSONLHelpers:
             assert len(loaded["classification"]) == 1
             assert len(loaded["generation"]) == 1
             assert loaded["generation"][0]["strategy"] == "random_random"
+
+
+# ─────────────────────────────────────────────
+# _failure_indices 반환 (task별 failed sample JSON 저장용)
+# ─────────────────────────────────────────────
+
+class TestFailureIndices:
+    """*_evaluate 함수가 실패 샘플 index를 _failure_indices 키로 노출하는지 검증."""
+
+    def test_classification_failure_indices_parse_failure(self):
+        probs = torch.tensor([[0.4, 0.6], [0.9, 0.1]])
+        # 두 번째 label은 boolean으로 파싱 불가 → failure_idxs에 1이 들어가야 함
+        labels = ["<BOOLEAN> True </BOOLEAN>", "garbage with no tag"]
+        result = classification_evaluate(probs, labels, "bace")
+        assert "_failure_indices" in result
+        assert result["_failure_indices"] == [1]
+
+    def test_regression_failure_indices_missing_float_token(self):
+        pred_texts = ["<FLOAT><|1|><|.|><|5|></FLOAT>", "<FLOAT>no dot token</FLOAT>"]
+        label_texts = ["<FLOAT>1.5</FLOAT>", "<FLOAT>2.0</FLOAT>"]
+        result = regression_evaluate(pred_texts, label_texts, "smol-property_prediction-esol")
+        assert "_failure_indices" in result
+        # 두 번째 pred는 <|.|> 토큰이 없어 assertion 실패 → failure
+        assert 1 in result["_failure_indices"]
+
+    def test_molecule_failure_indices_invalid_selfies(self):
+        pred_texts = ["<SELFIES>[C][C]</SELFIES>", "<SELFIES>@@@invalid</SELFIES>"]
+        label_texts = ["<SELFIES>[C][C]</SELFIES>", "<SELFIES>[C][O]</SELFIES>"]
+        result = molecule_evaluate(pred_texts, label_texts,
+                                   "forward_reaction_prediction", tokenizer=None)
+        assert "_failure_indices" in result
+        assert isinstance(result["_failure_indices"], list)
+
+    def test_caption_failure_indices_pattern_none(self):
+        """target에 DESCRIPTION/IUPAC/MOLFORMULA 태그가 없으면 failure_idxs에 기록."""
+        pred_texts = ["pred text", "<DESCRIPTION>desc</DESCRIPTION>"]
+        label_texts = ["target without any tag", "<DESCRIPTION>desc</DESCRIPTION>"]
+        result = caption_evaluate(pred_texts, label_texts, "chebi-20-mol2text",
+                                  tokenizer=None, meteor_tokenizers=["wordnet"])
+        assert "_failure_indices" in result
+        assert 0 in result["_failure_indices"]
+
+
+# ─────────────────────────────────────────────
+# Failed sample task별 JSON 저장 (validation._save_failed_per_task_static)
+# ─────────────────────────────────────────────
+
+class TestSaveFailedPerTask:
+    """validation.ValidationMixin._save_failed_per_task_static 동작 검증."""
+
+    def test_saves_task_scoped_json(self):
+        from src.training.validation import ValidationMixin
+
+        records = [
+            {"task": "bace", "probs": [0.1, 0.9], "label": "garbage"},
+            {"task": "bace", "probs": [0.2, 0.8], "label": "also garbage"},
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ValidationMixin._save_failed_per_task_static(
+                tmpdir, "bace", None, epoch=3, step=999, records=records
+            )
+            expected_path = os.path.join(
+                tmpdir, "val_predictions", "failed", "bace",
+                "epoch3_step999_cls.json",
+            )
+            assert os.path.exists(expected_path)
+            with open(expected_path, "r") as f:
+                payload = json.load(f)
+            assert payload["task"] == "bace"
+            assert payload["strategy"] is None
+            assert payload["epoch"] == 3
+            assert payload["global_step"] == 999
+            assert payload["num_failed"] == 2
+            assert len(payload["failed_samples"]) == 2
+
+    def test_noop_for_empty_records(self):
+        from src.training.validation import ValidationMixin
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ValidationMixin._save_failed_per_task_static(
+                tmpdir, "bace", "random_random", epoch=0, step=0, records=[]
+            )
+            # 빈 리스트면 파일이 생성되지 않아야 함
+            assert not os.path.exists(os.path.join(tmpdir, "val_predictions"))
+
+    def test_generation_strategy_in_filename(self):
+        from src.training.validation import ValidationMixin
+
+        records = [{"task": "retrosynthesis", "strategy": "random_random",
+                    "pred_text": "p", "label_text": "l"}]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ValidationMixin._save_failed_per_task_static(
+                tmpdir, "retrosynthesis", "random_random",
+                epoch=1, step=100, records=records
+            )
+            expected_path = os.path.join(
+                tmpdir, "val_predictions", "failed", "retrosynthesis",
+                "epoch1_step100_random_random.json",
+            )
+            assert os.path.exists(expected_path)
