@@ -1,0 +1,10 @@
+# Per-task stratified 1/100 Test subset (min 10 samples/task, seed=42).
+# Fast re-evaluation with sampling_steps=256 vs reference runs.
+# Train/Val are symlinks back to raw_v1_10x_rephrase (unused under mode=test).
+tag: raw_v1_10x_rephrase_testsub100
+root: raw_v1_10x_rephrase_testsub100
+
+splits:
+  train: Train
+  val: Val
+  test: Test
