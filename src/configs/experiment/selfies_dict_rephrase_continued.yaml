@@ -1,0 +1,49 @@
+# @package _global_
+# Resume from epoch=6 ckpt (7 epochs done) → train through epoch 11 (0-idx) =
+# 12번째 epoch → validate on Test split (sampling_steps=128) → stop.
+# 이후 매 epoch validation을 하려면 별도 실행 필요 (아래 주석 참고).
+
+defaults:
+  - override /data: raw_v1_10x_rephrase
+
+tokenizer:
+  mol_token_type: selfies
+  add_mol_dict: true
+
+wandb:
+  enabled: true
+  project: MolDA_pro6000
+  run_name: selfies_dict_rephrase_s${stage}
+  tags: [selfies, dict, raw_v1_10x_rephrase]
+  group: selfies_dict_rephrase
+
+logging:
+  dir: ./checkpoint/selfies_dict_rephrase/stage${stage}
+
+training:
+  max_epochs: 12               # epoch 11(0-idx) = 12번째 epoch 끝나면 stop
+  batch_size: 18
+  global_batch_size: 1080
+
+validation:
+  check_val_every_n_epoch: 12  # (11+1)%12==0 → epoch 11 끝에서 val 1회만
+                               # 두 번째 run에서는 1로 바꿔서 매 epoch val
+
+generation:
+  sampling_steps: 128          # 32 → 128 (높은 step으로 정확한 평가)
+
+# validation 시 Test split 사용 (원본 data config은 변경하지 않음)
+data:
+  splits:
+    val: Test
+
+# ─────────────────────────────────────────────────────────────
+# 12 epoch 종료 후 매 epoch validation으로 이어가려면:
+#   1) 위 max_epochs를 20(또는 원하는 값)으로 늘리고
+#      check_val_every_n_epoch를 1로 변경 후
+#   2) 새로 저장된 last.ckpt(epoch=11)에서 resume:
+#      python scripts/train.py +experiment=selfies_dict_rephrase_continued \
+#        trainer=stage1 \
+#        ckpt_path=checkpoint/selfies_dict_rephrase/stage1/last.ckpt \
+#        wandb.id=y0g03wux wandb.entity=hj_ai wandb.project=MolDA_pro6000
+# ─────────────────────────────────────────────────────────────
