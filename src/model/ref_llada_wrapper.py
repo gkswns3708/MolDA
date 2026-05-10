@@ -61,7 +61,16 @@ class RefMolDA(nn.Module):
         self.cfg = cfg
         self.ref_ckpt_path = ref_ckpt_path
 
-        self.molda = MolDA(cfg)
+        # CRITICAL: disable molpo on inner MolDA to prevent infinite recursion.
+        # MolDA.__init__ creates its own RefMolDA when cfg.molpo.enabled=True,
+        # which would recursively load LLaDA-8B → OOM. Force-clone cfg with
+        # molpo.enabled=False for the inner MolDA.
+        from omegaconf import OmegaConf
+        ref_cfg = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
+        if "molpo" in ref_cfg:
+            ref_cfg.molpo.enabled = False
+        self.molda = MolDA(ref_cfg)
+
         self._load_ref_ckpt(ref_ckpt_path)
         self._freeze_all()
 

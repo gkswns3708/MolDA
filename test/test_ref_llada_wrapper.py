@@ -54,6 +54,26 @@ class TestExtractStateDict:
         assert list(out.keys()) == ["x"]
 
 
+class TestRecursionGuard:
+    """RefMolDA 의 inner MolDA 가 또 다른 RefMolDA 를 만들지 않도록 cfg 수정 확인.
+
+    이전 버그: MolDA(cfg) 가 cfg.molpo.enabled=True 일 때 self.ref_model = RefMolDA(cfg)
+    호출 → RefMolDA 가 또 MolDA(cfg) → 무한 재귀 → LLaDA-8B 반복 로딩 → OOM Kill.
+    Fix: RefMolDA 가 inner MolDA 호출 전 cfg.molpo.enabled = False 로 override.
+    """
+
+    def test_ref_molda_disables_molpo_in_inner_cfg(self):
+        """소스 검사: RefMolDA.__init__ 가 inner MolDA 에 cfg 그대로 넘기지 않도록 확인."""
+        import src.model.ref_llada_wrapper as wrap_mod
+        src = open(wrap_mod.__file__).read()
+
+        # 명시적으로 molpo.enabled = False 처리해야 함
+        assert "molpo.enabled = False" in src or "molpo']['enabled'] = False" in src, (
+            "RefMolDA must disable molpo in inner MolDA cfg to prevent infinite recursion. "
+            "Otherwise MolDA(cfg) will create another RefMolDA → OOM."
+        )
+
+
 @pytest.mark.gpu
 @pytest.mark.slow
 def test_ref_molda_freeze(trainer_module):
