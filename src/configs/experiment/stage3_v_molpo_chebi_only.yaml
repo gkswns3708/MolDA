@@ -13,7 +13,7 @@
 #   bash scripts/train_stage3_v_molpo_chebi.sh
 
 defaults:
-  - override /data: chebi_text2mol_molpo_synth_256   # 256 token cap, chebi-20-text2mol only, ~225k samples
+  - override /data: chebi_text2mol_molpo_synth_256_5k   # 5k sample, 256 token cap, ~7시간/20epoch
 
 tokenizer:
   mol_token_type: selfies
@@ -30,17 +30,22 @@ logging:
   dir: ./checkpoint/stage3_v_molpo_chebi_only
 
 training:
-  # Phase 3 단일 task 검증: 200 epoch 까지 학습, 15 epoch 마다 validation.
-  max_epochs: 200
+  # Phase 3 단일 task trend 관찰: 5k sample × 20 epoch ≈ 7 시간 / 6 GPU.
+  # LLaDA 1.5 (350k × 1 epoch) 의 경량 단일 task 변형.
+  max_epochs: 20
   batch_size: 4                 # per-GPU. V-MolPO collator (mol_div=2) × n_t=2 stack → effective 16/GPU
   # global_batch_size = N_GPUS × batch_size × accum 의 배수 (Lightning assert).
   # 240 = 6 GPU × 4 × accum 10. 다른 GPU 수 / batch 사용 시 launcher 가 자동 계산.
   global_batch_size: 240
 
-# Validation 주기: 5 epoch 마다 (경향 관찰용 — 200 epoch run 중 manual stop 가능)
+# Validation 주기: 5000 sample 학습 볼 때마다 (step-based, dataset 크기에 robust).
+# val_check_interval 은 Lightning 의 micro-batch 단위 (int).
+# 6 GPU × batch 4 = 24 samples/batch → 5000 / 24 ≈ 208 batches.
+# launcher 가 N_GPUS / BATCH_SIZE 변경되면 자동 재계산하여 override.
 # generation: 128 sampling_steps (default 32 → 추론 품질 ↑)
 validation:
-  check_val_every_n_epoch: 5
+  check_val_every_n_epoch: 1     # 에폭 사이에서도 val 가능하게 1로 (val_check_interval 우선)
+  val_check_interval: 208        # 5000 / (6 × 4) — launcher 에서 동적 override 가능
   inference_batch_size: 4
 
 generation:

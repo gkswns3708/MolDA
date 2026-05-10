@@ -1,0 +1,20 @@
+# V-MolPO 단일 task trend 관찰용 — 5k sample, target ≤ 256 tokens.
+# LLaDA 1.5 paper (350K × 1 epoch) 보다 적지만 단일 task 라 충분.
+# build:
+#   ./venvs/MolDA_stage2/bin/python scripts/build_molpo_dataset_synthetic.py \
+#     --src dataset/Processed/raw_v1_10x_rephrase \
+#     --dst dataset/Processed/chebi_text2mol_molpo_synth_256_5k \
+#     --task chebi-20-text2mol \
+#     --max-target-token-length 256 \
+#     --max-samples 5000 \
+#     --num-proc 16 --seed 42
+#
+# Train: 5,000 / Val: 2,883 (filter 후) / Test: 2,900 (filter 후)
+# 5000 × 20 epoch × ~6.7s/iter ≈ 7시간 / 6 GPU
+tag: chebi_text2mol_molpo_synth_256_5k
+root: chebi_text2mol_molpo_synth_256_5k
+
+splits:
+  train: Train
+  val: Val
+  test: Test

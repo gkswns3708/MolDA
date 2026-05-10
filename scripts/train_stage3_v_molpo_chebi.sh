@@ -49,6 +49,13 @@ BATCH_SIZE="${BATCH_SIZE:-4}"
 ACCUM="${ACCUM:-10}"
 GLOBAL_BS="${GLOBAL_BS:-$((N_GPUS * BATCH_SIZE * ACCUM))}"
 
+# Validation step interval: 학습 중 매 VAL_EVERY_SAMPLES (default 5000) sample 마다 val.
+# Lightning 의 val_check_interval 은 micro-batch 단위 (int).
+# 5000 samples / (N_GPUS × BATCH_SIZE) = micro-batches between vals.
+VAL_EVERY_SAMPLES="${VAL_EVERY_SAMPLES:-5000}"
+VAL_CHECK_INTERVAL=$((VAL_EVERY_SAMPLES / (N_GPUS * BATCH_SIZE)))
+[ "$VAL_CHECK_INTERVAL" -lt 1 ] && VAL_CHECK_INTERVAL=1
+
 echo "============================================================"
 echo "Phase 3 — Stage 3 V-MolPO single task (ChEBI captioning)"
 echo "============================================================"
@@ -59,6 +66,7 @@ echo "  n_t                     = $N_T"
 echo "  beta                    = $BETA"
 echo "  max_epochs              = $MAX_EPOCHS"
 echo "  global_batch_size       = $GLOBAL_BS  (= N_GPUS × BATCH × accum=$ACCUM)"
+echo "  val every               = $VAL_EVERY_SAMPLES samples (= $VAL_CHECK_INTERVAL micro-batches)"
 echo "============================================================"
 
 if [ ! -f "$STAGE2_CKPT" ]; then
@@ -77,4 +85,5 @@ fi
     molpo.beta=$BETA \
     training.batch_size=$BATCH_SIZE \
     training.max_epochs=$MAX_EPOCHS \
-    training.global_batch_size=$GLOBAL_BS
+    training.global_batch_size=$GLOBAL_BS \
+    validation.val_check_interval=$VAL_CHECK_INTERVAL
