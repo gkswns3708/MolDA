@@ -38,14 +38,12 @@ training:
   # 240 = 6 GPU × 4 × accum 10. 다른 GPU 수 / batch 사용 시 launcher 가 자동 계산.
   global_batch_size: 240
 
-# Validation 주기: 5000 sample 학습 볼 때마다 (step-based, dataset 크기에 robust).
-# val_check_interval 은 Lightning 의 micro-batch 단위 (int).
-# 6 GPU × batch 4 = 24 samples/batch → 5000 / 24 ≈ 208 batches.
-# launcher 가 N_GPUS / BATCH_SIZE 변경되면 자동 재계산하여 override.
+# Validation 주기: 5 epoch 마다 (check_val_every_n_epoch).
+# val_check_interval=1.0 (default) → epoch 끝에서만 val 트리거.
 # generation: 128 sampling_steps (default 32 → 추론 품질 ↑)
 validation:
-  check_val_every_n_epoch: 1     # 에폭 사이에서도 val 가능하게 1로 (val_check_interval 우선)
-  val_check_interval: 208        # 5000 / (6 × 4) — launcher 에서 동적 override 가능
+  check_val_every_n_epoch: 5
+  val_check_interval: 1.0
   inference_batch_size: 4
 
 generation:
