@@ -32,14 +32,44 @@ from datasets import load_from_disk, Dataset
 
 
 def synthesize_pairs(ds: Dataset, task_filter: str | None, mol_token_type: str,
-                     max_samples: int | None, seed: int) -> Dataset:
-    """Add target_text_chosen / target_text_rejected columns by random pairing."""
+                     max_samples: int | None, seed: int,
+                     max_target_token_length: int | None = None,
+                     tokenizer=None) -> Dataset:
+    """Add target_text_chosen / target_text_rejected columns by random pairing.
+
+    Args:
+        max_target_token_length: filter out samples whose tokenized target exceeds
+            this. Useful when generation cap (gen_max_len) is set (e.g., 256) — train/val
+            consistency: model can never generate an answer longer than gen_max_len, so
+            ground-truth target longer than gen_max_len is unreachable → exact_match
+            forced to 0 for those samples regardless of model quality.
+        tokenizer: HF tokenizer instance (required if max_target_token_length set)
+    """
     rng = random.Random(seed)
 
     # Filter by task if requested
     if task_filter:
         keep_mask = [t == task_filter for t in ds["task"]]
         ds = ds.filter(lambda _, idx: keep_mask[idx], with_indices=True)
+
+    # Determine target column name
+    chosen_col = f"target_text_{mol_token_type}" if f"target_text_{mol_token_type}" in ds.column_names else "target_text"
+    if chosen_col not in ds.column_names:
+        raise RuntimeError(f"Neither 'target_text' nor 'target_text_{mol_token_type}' in dataset")
+
+    # Length filter (before max_samples sub-sampling)
+    if max_target_token_length is not None and max_target_token_length > 0:
+        if tokenizer is None:
+            raise ValueError("max_target_token_length requires tokenizer")
+        n_before = len(ds)
+        keep_mask = [
+            len(tokenizer.encode(t, add_special_tokens=False)) <= max_target_token_length
+            for t in ds[chosen_col]
+        ]
+        ds = ds.filter(lambda _, idx: keep_mask[idx], with_indices=True)
+        n_after = len(ds)
+        print(f"  Length filter (target ≤ {max_target_token_length} tokens): "
+              f"{n_before} → {n_after} ({100*(n_before-n_after)/n_before:.1f}% removed)")
 
     if max_samples and len(ds) > max_samples:
         idx = rng.sample(range(len(ds)), max_samples)
@@ -48,11 +78,6 @@ def synthesize_pairs(ds: Dataset, task_filter: str | None, mol_token_type: str,
     n = len(ds)
     if n < 2:
         raise RuntimeError(f"Need ≥2 samples for synthetic pairing; got {n}.")
-
-    # Determine target column name
-    chosen_col = f"target_text_{mol_token_type}" if f"target_text_{mol_token_type}" in ds.column_names else "target_text"
-    if chosen_col not in ds.column_names:
-        raise RuntimeError(f"Neither 'target_text' nor 'target_text_{mol_token_type}' in dataset")
 
     targets = ds[chosen_col]
 
@@ -90,6 +115,9 @@ def main():
     ap.add_argument("--mol-token-type", default="selfies", choices=["selfies", "smiles"])
     ap.add_argument("--max-samples", type=int, default=None,
                     help="cap per-split sample count (Phase 3 sanity)")
+    ap.add_argument("--max-target-token-length", type=int, default=None,
+                    help="filter out samples whose tokenized target exceeds this length "
+                         "(e.g., 256 = generation cap). NaN exact_match defense.")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--splits", nargs="+", default=["Train", "Val", "Test"])
     args = ap.parse_args()
@@ -97,6 +125,15 @@ def main():
     src = Path(args.src)
     dst = Path(args.dst)
     dst.mkdir(parents=True, exist_ok=True)
+
+    # Lazy load tokenizer only when length filter requested
+    tokenizer = None
+    if args.max_target_token_length is not None:
+        from transformers import AutoTokenizer
+        print(f"Loading tokenizer for length filter (max={args.max_target_token_length}) ...")
+        tokenizer = AutoTokenizer.from_pretrained(
+            "GSAI-ML/LLaDA-8B-Instruct", trust_remote_code=True
+        )
 
     for split in args.splits:
         src_split = src / split
@@ -110,6 +147,8 @@ def main():
             mol_token_type=args.mol_token_type,
             max_samples=args.max_samples,
             seed=args.seed,
+            max_target_token_length=args.max_target_token_length,
+            tokenizer=tokenizer,
         )
         n_out = len(ds_out)
         out_split = dst / split
