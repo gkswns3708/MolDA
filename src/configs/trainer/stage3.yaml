@@ -13,7 +13,7 @@ model:
   tune_gnn: true
 
 training:
-  max_epochs: 6
+  max_epochs: 3                # ⬅ DPO 류는 1-3 epoch 표준 (Stage 2 가 이미 수렴 후 시작)
   batch_size: 1
   global_batch_size: 1024
 
@@ -26,22 +26,36 @@ lr:
   other: ???                # Q-Former, GNN, query_tokens, opt_proj, ln_graph
 
 # ─────────────────────────────────────────────
-# MolPO (Molecular Preference Optimization)
+# V-MolPO (Variance-Reduced MolPO)
+# Phase 0 측정 결과 (2026-05-10) 반영:
+#   n_t=2 sweet spot, antithetic 99.7% 분산 제거 → 둘 다 활성화 권장
+#   상세: plan/stage3.md §2 (Phase 0 결과)
 # ─────────────────────────────────────────────
 molpo:
   enabled: true
-  # Loss: L_total = sft_weight × L_SFT + molpo_weight × L_MolPO
+  # Loss: L_total = sft_weight × L_SFT + molpo_weight × L_pref + anc_rejected_weight × L_anchor
   sft_weight: 1.0
   molpo_weight: 0.25        # 논문 권장값 (c = 0.25)
+  anc_rejected_weight: 0.0  # anchor_rejected loss 계수 (default: 끔)
+  rejected_lambda: 1.5      # anchor 의 rejected scaling
+
   # Preference optimization hyperparameters
-  beta: 1.0                 # temperature (logit scaling)
-  gamma_beta_ratio: 0.5     # γ/β 비율
+  beta: 0.1                 # temperature (logit scaling). LLaDA 1.5 권장 = 0.1
+  gamma_beta_ratio: 0.5     # γ/β 비율 (margin clip 보조)
+
   # Task-adaptive margin: γ_i = lambda × |E[r_w,i]|
   lambda: 0.5               # margin scaling coefficient (논문 권장: 0.5)
   margin_clip_scale: 1.0    # margin clipping threshold λ_clip
+  margin_clip_burn_in: 1000 # burn-in step 수 (이후 clip 해제)
   loss_type: sigmoid
-  batch_division: 2         # 2: (chosen, rejected) pair
-  exclude_mol_tokens: false  # graph token을 loss에서 제외할지 여부
+  batch_division: 2         # 2: (chosen, rejected) pair | 3: + sft slice
+  exclude_mol_tokens: false # graph token 을 loss 에서 제외할지 여부
+  require_pair: true        # collator 가 chosen/rejected 없는 sample 만나면 raise
+
+  # VRPO (Variance-Reduced Preference Optimization, LLaDA 1.5)
+  n_t: 2                    # MC 평균 timestep 수 (Phase 0 sweet spot)
+  antithetic: true          # πθ ↔ πref (T, M) 공유 (필수)
+  ref_ckpt_path: ???        # π_ref ckpt 경로 (Stage 2 last.ckpt, CLI 로 override)
 
 validation:
   check_val_every_n_epoch: 1

@@ -15,6 +15,7 @@ from torch.utils.data import DataLoader
 
 from src.data.collator import TrainCollator, EvalCollator
 from src.data.dataset import MoleculeDataset
+from src.data.molpo_collator import MolPOTrainCollator
 
 logger = logging.getLogger(__name__)
 
@@ -87,12 +88,35 @@ class MolDADataModule(pl.LightningDataModule):
             )
             logger.info(f"Test: {len(self.test_dataset)} samples")
 
-    def train_dataloader(self):
-        collator = TrainCollator(
+    def _build_train_collator(self):
+        """Train collator selection: MolPOTrainCollator if molpo enabled, else TrainCollator."""
+        molpo_cfg = self.cfg.get("molpo", None)
+        molpo_enabled = bool(molpo_cfg and molpo_cfg.get("enabled", False))
+
+        if molpo_enabled:
+            # Sanity: dataset must have chosen/rejected pair columns
+            if not getattr(self.train_dataset, "has_molpo_pair", False):
+                logger.warning(
+                    "molpo.enabled=true but train_dataset has no chosen/rejected columns. "
+                    "MolPOTrainCollator will use require_pair=False (skip non-pair samples). "
+                    "Make sure your dataset has target_text_chosen/_rejected columns."
+                )
+            return MolPOTrainCollator(
+                tokenizer=self.train_tokenizer,
+                mol_representation=self.cfg.model.mol_representation,
+                max_length=self.cfg.data.max_length,
+                batch_division=int(molpo_cfg.get("batch_division", 2)),
+                mol_token_type=self.cfg.tokenizer.mol_token_type,
+                require_pair=bool(molpo_cfg.get("require_pair", True)),
+            )
+        return TrainCollator(
             tokenizer=self.train_tokenizer,
             mol_representation=self.cfg.model.mol_representation,
             max_length=self.cfg.data.max_length,
         )
+
+    def train_dataloader(self):
+        collator = self._build_train_collator()
         return DataLoader(
             self.train_dataset,
             batch_size=self.cfg.training.batch_size,
