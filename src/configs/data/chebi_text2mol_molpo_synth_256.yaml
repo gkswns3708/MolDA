@@ -1,0 +1,24 @@
+# V-MolPO 단일 task 학습용 합성 데이터.
+# build:
+#   python scripts/build_molpo_dataset_synthetic.py \
+#     --src dataset/Processed/raw_v1_10x_rephrase \
+#     --dst dataset/Processed/chebi_text2mol_molpo_synth_256 \
+#     --task chebi-20-text2mol \
+#     --max-target-token-length 256 \
+#     --num-proc 16 --seed 42
+#
+# Filter: chebi-20-text2mol task only, target token length ≤ 256
+# (gen_max_len=256 보다 긴 정답은 generation 시 도달 불가 → exact_match 0 강제)
+#
+# Train: 224,840 / Val: 2,883 / Test: 2,900
+# chosen   = original target SMILES
+# rejected = same-task 의 다른 sample target (random pairing)
+# 주의: random rejection 은 인프라 검증용. 실제 preference learning 효과 검증을
+#       위해서는 Stage 2 ckpt 로 negative 생성 또는 token-swap strategy 필요.
+tag: chebi_text2mol_molpo_synth_256
+root: chebi_text2mol_molpo_synth_256
+
+splits:
+  train: Train
+  val: Val
+  test: Test
