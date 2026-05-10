@@ -39,9 +39,8 @@ N_GPUS=$(echo $GPUS | tr ',' '\n' | grep -c .)
 # ── 학습 옵션 ────────────────────────────────────────
 N_T="${N_T:-2}"
 BETA="${BETA:-0.1}"
-# 기본 200 epoch — 단일 task 검증 시 trend 관찰용. 사용자가 Ctrl+C 로 manual stop.
-# 짧게 돌리려면 MAX_EPOCHS=20 등 env override.
-MAX_EPOCHS="${MAX_EPOCHS:-200}"
+# 기본 20 epoch (5K dataset, ~7-12시간). 더 길게 돌리려면 MAX_EPOCHS=200 등 env override.
+MAX_EPOCHS="${MAX_EPOCHS:-20}"
 # Per-GPU forward batch. V-MolPO collator 가 mol_div=2 → 2× expansion,
 # n_t=2 stack → 추가 2× → effective tensor 첫차원 = BATCH_SIZE × 4.
 # RTX PRO 6000 (97GB) 환경: BATCH_SIZE=4 권장 (effective 16 per GPU, ~50GB GPU 사용).
