@@ -37,6 +37,17 @@ training:
   # 240 = 6 GPU × 1 × accum 40. 다른 GPU 수 사용 시 launcher 가 자동 계산 (CLI override).
   global_batch_size: 240
 
+# Learning rates per param group.
+# V-MolPO 는 reference policy 와의 KL anchoring 이 강해서 stage 1 보다 작은 LR 사용.
+# Stage 1 base LR (2.5e-4) 의 1/2 인 1.25e-4 부터 시작 (필요 시 CLI 로 override).
+lr:
+  lora: 1.25e-4               # LoRA adapters (V-MolPO 는 reference 가 잡아주므로 보수적)
+  embed_orig: 1.25e-5         # 기존 vocab embedding (LoRA 의 1/10)
+  embed_new: 1.25e-5          # 신규 SELFIES embedding
+  head_orig: 0.0              # weight_tying=True: 미사용
+  head_new: 0.0               # weight_tying=True: 미사용
+  other: 2.5e-5               # Q-Former, GNN, query_tokens, opt_proj, ln_graph
+
 # V-MolPO 핵심 hyperparameter override (default stage3.yaml 값 + Phase 0 결정)
 molpo:
   enabled: true
