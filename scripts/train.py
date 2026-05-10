@@ -32,6 +32,12 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
 torch.set_float32_matmul_precision("medium")
 
+# Suppress DDP + V-MolPO 의 AccumulateGrad stream-mismatch UserWarning.
+# 매 backward 마다 발생하여 tqdm progress 를 가림. 학습 정확도에 영향 없음.
+# (DDP 가 grad node 를 stash 하여 발생하는 정상 동작)
+if hasattr(torch.autograd.graph, "set_warn_on_accumulate_grad_stream_mismatch"):
+    torch.autograd.graph.set_warn_on_accumulate_grad_stream_mismatch(False)
+
 # PyTorch 2.6+: default weights_only=True blocks OmegaConf-pickled hparams.
 # Our ckpts are our own trusted artifacts, so hard-force weights_only=False
 # even when callers (Lightning) explicitly pass weights_only=True.
