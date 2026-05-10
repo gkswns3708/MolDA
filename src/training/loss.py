@@ -35,12 +35,20 @@ class MaskedDiffusionLoss(nn.Module):
         self.log_nan = log_nan
         self.nan_log_dir = nan_log_dir
 
-    def make_noisy(self, input_ids: torch.Tensor, labels: torch.Tensor):
+    def make_noisy(self, input_ids: torch.Tensor, labels: torch.Tensor,
+                   t_override: torch.Tensor | None = None,
+                   mask_indices_override: torch.Tensor | None = None):
         """Forward process: mask answer tokens with probability p_mask.
 
         Args:
             input_ids: [B, L] original token ids
             labels: [B, L] with -100 for prompt positions
+            t_override: [B] optional pre-sampled timesteps (for V-MolPO antithetic).
+                When provided, skip internal `torch.rand(B)` call. Mutually exclusive
+                with mask_indices_override only by purpose — both can be supplied.
+            mask_indices_override: [B, L] optional pre-computed boolean mask
+                (already AND-ed with answer_mask, ≥1 mask guarantee applied externally).
+                When provided, skip internal mask sampling.
 
         Returns:
             noisy_ids: [B, L] with MASK tokens in answer positions
@@ -51,21 +59,35 @@ class MaskedDiffusionLoss(nn.Module):
         device = input_ids.device
 
         # t ~ Uniform(0,1), p_mask = (1-eps)*t + eps
-        t = torch.rand(b, device=device)
+        if t_override is not None:
+            assert t_override.shape == (b,), (
+                f"t_override must be [B={b}], got {tuple(t_override.shape)}"
+            )
+            t = t_override.to(device)
+        else:
+            t = torch.rand(b, device=device)
         p_mask = (1 - self.eps) * t + self.eps  # [B]
-        p_mask_expanded = p_mask[:, None].expand(b, l)  # [B, L]
 
         # Only mask answer positions (labels != -100)
         answer_mask = (labels != -100)  # [B, L]
-        rand_mask = torch.rand((b, l), device=device) < p_mask_expanded
-        mask_indices = rand_mask & answer_mask
 
-        # Guarantee >= 1 masked token per sample
-        for i in range(b):
-            if mask_indices[i].sum() == 0 and answer_mask[i].sum() > 0:
-                answer_positions = answer_mask[i].nonzero(as_tuple=False).squeeze(-1)
-                rand_idx = answer_positions[torch.randint(len(answer_positions), (1,))]
-                mask_indices[i, rand_idx] = True
+        if mask_indices_override is not None:
+            assert mask_indices_override.shape == (b, l), (
+                f"mask_indices_override must be [B,L]=[{b},{l}], "
+                f"got {tuple(mask_indices_override.shape)}"
+            )
+            mask_indices = mask_indices_override.to(device).bool()
+        else:
+            p_mask_expanded = p_mask[:, None].expand(b, l)  # [B, L]
+            rand_mask = torch.rand((b, l), device=device) < p_mask_expanded
+            mask_indices = rand_mask & answer_mask
+
+            # Guarantee >= 1 masked token per sample
+            for i in range(b):
+                if mask_indices[i].sum() == 0 and answer_mask[i].sum() > 0:
+                    answer_positions = answer_mask[i].nonzero(as_tuple=False).squeeze(-1)
+                    rand_idx = answer_positions[torch.randint(len(answer_positions), (1,))]
+                    mask_indices[i, rand_idx] = True
 
         noisy_ids = torch.where(mask_indices, self.mask_token_id, input_ids)
         return noisy_ids, mask_indices, p_mask[:, None]  # p_mask: [B, 1]
