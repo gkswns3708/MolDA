@@ -13,7 +13,7 @@
 #   bash scripts/train_stage3_v_molpo_chebi.sh
 
 defaults:
-  - override /data: raw_v1_10x_rephrase    # 단일 task filter 는 dataset 단에서
+  - override /data: chebi_text2mol_molpo_synth   # synthetic chosen/rejected, chebi-20-text2mol only
 
 tokenizer:
   mol_token_type: selfies
@@ -32,9 +32,9 @@ logging:
 training:
   # Phase 3 검증: 단일 task → 적은 step 으로 발산 여부 + metric 변화 관찰
   max_epochs: 1
-  batch_size: 1                 # V-MolPO collator 가 2B (mol_div=2) 만들어 effective 4 (n_t=2 stack)
-  # global_batch_size 는 N_GPUS × batch_size 의 배수여야 함 (Lightning assert).
-  # 240 = 6 GPU × 1 × accum 40. 다른 GPU 수 사용 시 launcher 가 자동 계산 (CLI override).
+  batch_size: 4                 # per-GPU. V-MolPO collator (mol_div=2) × n_t=2 stack → effective 16/GPU
+  # global_batch_size = N_GPUS × batch_size × accum 의 배수 (Lightning assert).
+  # 240 = 6 GPU × 4 × accum 10. 다른 GPU 수 / batch 사용 시 launcher 가 자동 계산.
   global_batch_size: 240
 
 # Learning rates per param group.

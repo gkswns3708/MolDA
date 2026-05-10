@@ -1,0 +1,16 @@
+# Phase 3 V-MolPO 단일 task 검증용 합성 데이터.
+# build: python scripts/build_molpo_dataset_synthetic.py \
+#          --src dataset/Processed/raw_v1_10x_rephrase \
+#          --dst dataset/Processed/chebi_text2mol_molpo_synth \
+#          --task chebi-20-text2mol --max-samples 5000
+# chosen   = original target SMILES
+# rejected = same-task 의 다른 sample target (random pairing)
+# 주의: synthetic random rejection 은 인프라 검증용. 실제 preference learning
+#       검증을 위해서는 Stage 2 ckpt 로 negative 생성 또는 token-swap 필요.
+tag: chebi_text2mol_molpo_synth
+root: chebi_text2mol_molpo_synth
+
+splits:
+  train: Train
+  val: Val
+  test: Test

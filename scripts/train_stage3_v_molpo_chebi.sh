@@ -20,6 +20,14 @@ cd "$(dirname "$0")/.."
 export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
+# venv 선택 — flash_attn (Q-Former의 BertEncoder 의존) 이 venvs/MolDA_stage2 에만 설치됨.
+# 다른 venv 활성 상태에서 실행되어도 올바른 python 자동 선택.
+PY="${PY:-./venvs/MolDA_stage2/bin/python}"
+if [ ! -x "$PY" ]; then
+    echo "WARN: $PY not found, falling back to system python (flash_attn 미설치 가능성)"
+    PY="python"
+fi
+
 # ── 입력 ckpt ─────────────────────────────────────────
 # πθ 출발점 + πref 모두 Stage 2 ckpt (사용자 결정: stage 3 = stage 2 에서 시작)
 STAGE2_CKPT="${STAGE2_CKPT:-./checkpoint/selfies_dict_rephrase/stage2/last.ckpt}"
@@ -32,20 +40,23 @@ N_GPUS=$(echo $GPUS | tr ',' '\n' | grep -c .)
 N_T="${N_T:-2}"
 BETA="${BETA:-0.1}"
 MAX_EPOCHS="${MAX_EPOCHS:-1}"
-# global_batch_size 는 N_GPUS × batch_size(1) 의 배수 여야 함 (Lightning assert).
-# default: N_GPUS × 1 × 40 (accumulate=40 → 6 GPU 면 240)
-ACCUM="${ACCUM:-40}"
-GLOBAL_BS="${GLOBAL_BS:-$((N_GPUS * ACCUM))}"
+# Per-GPU forward batch. V-MolPO collator 가 mol_div=2 → 2× expansion,
+# n_t=2 stack → 추가 2× → effective tensor 첫차원 = BATCH_SIZE × 4.
+# RTX PRO 6000 (97GB) 환경: BATCH_SIZE=4 권장 (effective 16 per GPU, ~50GB GPU 사용).
+BATCH_SIZE="${BATCH_SIZE:-4}"
+ACCUM="${ACCUM:-10}"
+GLOBAL_BS="${GLOBAL_BS:-$((N_GPUS * BATCH_SIZE * ACCUM))}"
 
 echo "============================================================"
 echo "Phase 3 — Stage 3 V-MolPO single task (ChEBI captioning)"
 echo "============================================================"
 echo "  STAGE2_CKPT (πθ + πref) = $STAGE2_CKPT"
 echo "  GPUs                    = $GPUS  (N_GPUS=$N_GPUS)"
+echo "  batch_size (per-GPU)    = $BATCH_SIZE  (V-MolPO effective ×4 = $((BATCH_SIZE*4)))"
 echo "  n_t                     = $N_T"
 echo "  beta                    = $BETA"
 echo "  max_epochs              = $MAX_EPOCHS"
-echo "  global_batch_size       = $GLOBAL_BS  (= N_GPUS × accum=$ACCUM)"
+echo "  global_batch_size       = $GLOBAL_BS  (= N_GPUS × BATCH × accum=$ACCUM)"
 echo "============================================================"
 
 if [ ! -f "$STAGE2_CKPT" ]; then
@@ -54,7 +65,7 @@ if [ ! -f "$STAGE2_CKPT" ]; then
     exit 1
 fi
 
-python scripts/train.py \
+"$PY" scripts/train.py \
     +experiment=stage3_v_molpo_chebi_only \
     trainer=stage3 \
     "hardware.devices='$GPUS'" \
@@ -62,5 +73,6 @@ python scripts/train.py \
     "molpo.ref_ckpt_path='$STAGE2_CKPT'" \
     molpo.n_t=$N_T \
     molpo.beta=$BETA \
+    training.batch_size=$BATCH_SIZE \
     training.max_epochs=$MAX_EPOCHS \
     training.global_batch_size=$GLOBAL_BS
