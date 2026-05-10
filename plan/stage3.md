@@ -220,8 +220,9 @@ step 당 forward 비용:
 │ ref_model 메모리     │ LoRA gate=0 toggle 로 backbone 공유          │
 │                      │ → 추가 weight 0, activation 만 별도 fwd      │
 ├──────────────────────┼──────────────────────────────────────────────┤
-│ tune_gnn (stage 3)   │ 초기엔 false (Q-Former+graph 정렬은 stage2 끝)│
-│                      │ → preference signal 만으로 LoRA 업데이트     │
+│ tune_gnn (stage 3)   │ true (LLM backbone 외 모두 학습 — 사용자 결정) │
+│                      │ → GNN + Q-Former 도 V-MolPO loss 로 함께 갱신 │
+│                      │ → ablation 으로 tune_gnn=false 비교 가능       │
 ├──────────────────────┼──────────────────────────────────────────────┤
 │ molpo.batch_division │ 2 (순수 DPO-E) → 검증 후 3 ablation          │
 ├──────────────────────┼──────────────────────────────────────────────┤

@@ -404,7 +404,8 @@ class MolDA(nn.Module):
                     # frozen reference policy — never trainable
                     p.requires_grad = False
                 elif name.startswith("gnn.") or name.startswith("qformer."):
-                    # graph encoder + bridge — gated by tune_gnn (Stage 2 가 정렬 마쳤으면 false)
+                    # graph encoder + Q-Former — Stage 3 에서 GNN 도 함께 학습 (cfg.model.tune_gnn=true).
+                    # tune_gnn=false 로 override 시에만 frozen (ablation 용도).
                     p.requires_grad = tune_gnn
                 elif "lora_" in name or ".modules_to_save." in name:
                     # PEFT LoRA adapter + PEFT-wrapped wte/lm_head (modules_to_save)
