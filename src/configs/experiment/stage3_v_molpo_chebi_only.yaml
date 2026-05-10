@@ -37,10 +37,10 @@ training:
   # 240 = 6 GPU × 4 × accum 10. 다른 GPU 수 / batch 사용 시 launcher 가 자동 계산.
   global_batch_size: 240
 
-# Validation 주기: 15 epoch 마다 (default stage3.yaml 의 1 → override)
+# Validation 주기: 5 epoch 마다 (경향 관찰용 — 200 epoch run 중 manual stop 가능)
 # generation: 128 sampling_steps (default 32 → 추론 품질 ↑)
 validation:
-  check_val_every_n_epoch: 15
+  check_val_every_n_epoch: 5
   inference_batch_size: 4
 
 generation:

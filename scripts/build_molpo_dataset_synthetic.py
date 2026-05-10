@@ -28,7 +28,11 @@ PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from datasets import load_from_disk, Dataset
+from datasets import load_from_disk, Dataset, disable_caching
+
+# 빌드 중 add_column / map 의 disk temp 파일 생성 방지 (in-memory 처리 → 빠름).
+# save_to_disk 가 최종 결과만 쓰면 되므로 caching 불필요.
+disable_caching()
 
 
 # Global tokenizer cache per worker process (lazy init for HF datasets multi-proc map).
@@ -126,18 +130,23 @@ def synthesize_pairs(ds: Dataset, task_filter: str | None, mol_token_type: str,
     rejected_targets = [targets[j] for j in rejected_idx]
 
     # Add columns (single + dual variant for compat)
-    new_cols = {
-        "target_text_chosen": list(targets),
-        "target_text_rejected": rejected_targets,
-        f"target_text_chosen_{mol_token_type}": list(targets),
-        f"target_text_rejected_{mol_token_type}": rejected_targets,
-    }
+    # chosen / rejected pair columns 추가.
+    # Multi-proc + closure 는 224k strings 를 64 워커에 pickle 해야 해서 느림.
+    # PyArrow append_column 이 단일 단계에서 가장 빠름 (in-memory, no rebuild).
+    suffix_chosen = f"target_text_chosen_{mol_token_type}"
+    suffix_rej = f"target_text_rejected_{mol_token_type}"
 
-    for i, (col, vals) in enumerate(new_cols.items(), 1):
-        print(f"  Adding column [{i}/{len(new_cols)}] {col} ...", flush=True)
-        if col in ds.column_names:
-            ds = ds.remove_columns([col])
-        ds = ds.add_column(col, vals)
+    drop = [c for c in ("target_text_chosen", "target_text_rejected",
+                        suffix_chosen, suffix_rej) if c in ds.column_names]
+    if drop:
+        ds = ds.remove_columns(drop)
+
+    chosen_vals = list(targets)
+    print(f"  Adding chosen/rejected columns via Dataset.add_column ...", flush=True)
+    ds = ds.add_column("target_text_chosen", chosen_vals)
+    ds = ds.add_column("target_text_rejected", rejected_targets)
+    ds = ds.add_column(suffix_chosen, chosen_vals)
+    ds = ds.add_column(suffix_rej, rejected_targets)
 
     return ds
 
