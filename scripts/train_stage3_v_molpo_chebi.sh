@@ -26,22 +26,26 @@ STAGE2_CKPT="${STAGE2_CKPT:-./checkpoint/selfies_dict_rephrase/stage2/last.ckpt}
 
 # ── GPU ──────────────────────────────────────────────
 GPUS="${GPUS:-0,1,2,3,4,5}"
+N_GPUS=$(echo $GPUS | tr ',' '\n' | grep -c .)
 
 # ── 학습 옵션 ────────────────────────────────────────
 N_T="${N_T:-2}"
 BETA="${BETA:-0.1}"
 MAX_EPOCHS="${MAX_EPOCHS:-1}"
-GLOBAL_BS="${GLOBAL_BS:-256}"
+# global_batch_size 는 N_GPUS × batch_size(1) 의 배수 여야 함 (Lightning assert).
+# default: N_GPUS × 1 × 40 (accumulate=40 → 6 GPU 면 240)
+ACCUM="${ACCUM:-40}"
+GLOBAL_BS="${GLOBAL_BS:-$((N_GPUS * ACCUM))}"
 
 echo "============================================================"
 echo "Phase 3 — Stage 3 V-MolPO single task (ChEBI captioning)"
 echo "============================================================"
 echo "  STAGE2_CKPT (πθ + πref) = $STAGE2_CKPT"
-echo "  GPUs                    = $GPUS"
+echo "  GPUs                    = $GPUS  (N_GPUS=$N_GPUS)"
 echo "  n_t                     = $N_T"
 echo "  beta                    = $BETA"
 echo "  max_epochs              = $MAX_EPOCHS"
-echo "  global_batch_size       = $GLOBAL_BS"
+echo "  global_batch_size       = $GLOBAL_BS  (= N_GPUS × accum=$ACCUM)"
 echo "============================================================"
 
 if [ ! -f "$STAGE2_CKPT" ]; then

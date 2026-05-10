@@ -32,8 +32,10 @@ logging:
 training:
   # Phase 3 검증: 단일 task → 적은 step 으로 발산 여부 + metric 변화 관찰
   max_epochs: 1
-  batch_size: 1                 # V-MolPO 는 collator 가 2B (mol_div=2) 만들어 effective 2x4=8
-  global_batch_size: 256        # 6 GPU 기준 256 = 1 × 6 × accum 43
+  batch_size: 1                 # V-MolPO collator 가 2B (mol_div=2) 만들어 effective 4 (n_t=2 stack)
+  # global_batch_size 는 N_GPUS × batch_size 의 배수여야 함 (Lightning assert).
+  # 240 = 6 GPU × 1 × accum 40. 다른 GPU 수 사용 시 launcher 가 자동 계산 (CLI override).
+  global_batch_size: 240
 
 # V-MolPO 핵심 hyperparameter override (default stage3.yaml 값 + Phase 0 결정)
 molpo:
