@@ -13,7 +13,7 @@
 #   bash scripts/train_stage3_v_molpo_chebi.sh
 
 defaults:
-  - override /data: chebi_text2mol_molpo_synth   # synthetic chosen/rejected, chebi-20-text2mol only
+  - override /data: chebi_text2mol_molpo_synth_256   # 256 token cap, chebi-20-text2mol only, ~225k samples
 
 tokenizer:
   mol_token_type: selfies
@@ -30,12 +30,21 @@ logging:
   dir: ./checkpoint/stage3_v_molpo_chebi_only
 
 training:
-  # Phase 3 검증: 단일 task → 적은 step 으로 발산 여부 + metric 변화 관찰
-  max_epochs: 1
+  # Phase 3 단일 task 검증: 200 epoch 까지 학습, 15 epoch 마다 validation.
+  max_epochs: 200
   batch_size: 4                 # per-GPU. V-MolPO collator (mol_div=2) × n_t=2 stack → effective 16/GPU
   # global_batch_size = N_GPUS × batch_size × accum 의 배수 (Lightning assert).
   # 240 = 6 GPU × 4 × accum 10. 다른 GPU 수 / batch 사용 시 launcher 가 자동 계산.
   global_batch_size: 240
+
+# Validation 주기: 15 epoch 마다 (default stage3.yaml 의 1 → override)
+# generation: 128 sampling_steps (default 32 → 추론 품질 ↑)
+validation:
+  check_val_every_n_epoch: 15
+  inference_batch_size: 4
+
+generation:
+  sampling_steps: 128
 
 # Learning rates per param group.
 # V-MolPO 는 reference policy 와의 KL anchoring 이 강해서 stage 1 보다 작은 LR 사용.

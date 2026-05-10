@@ -109,6 +109,25 @@ class MolDATrainer(OptimizerMixin, ValidationMixin, CheckpointMixin, pl.Lightnin
     # ─────────────────────────────────────────
 
     def training_step(self, batch, batch_idx):
+        if batch_idx == 0 and self.global_rank == 0:
+            is_molpo_batch = "molpo_batch_size" in batch
+            molpo_enabled = getattr(self.model, "molpo_enabled", False)
+            mode = "V-MolPO" if (is_molpo_batch and molpo_enabled) else "SFT"
+            molpo_size = batch.get("molpo_batch_size", "n/a")
+            molpo_div = batch.get("molpo_batch_division", "n/a")
+            print(
+                f"\n{'=' * 60}\n"
+                f"[Sanity check, Rank 0, batch 0] Active mode = {mode}\n"
+                f"  molpo_enabled (model)        = {molpo_enabled}\n"
+                f"  molpo_batch_size in batch    = {is_molpo_batch}\n"
+                f"  molpo_batch_size value       = {molpo_size}\n"
+                f"  molpo_batch_division value   = {molpo_div}\n"
+                f"  input_ids shape              = {tuple(batch['input_ids'].shape)}\n"
+                f"  has graphs?                  = {'graphs' in batch}\n"
+                f"  ref_model present?           = {self.model.ref_model is not None}\n"
+                f"{'=' * 60}",
+                flush=True,
+            )
         if batch_idx == 0:
             print(f"[Rank {self.global_rank}] training_step: batch_idx=0 ENTERED", flush=True)
         batch["global_step"] = self.global_step
