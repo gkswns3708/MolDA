@@ -81,14 +81,23 @@ class RefMolDA(nn.Module):
             raise FileNotFoundError(f"RefMolDA ckpt not found: {path}")
         ckpt = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
         clean = _extract_state_dict(ckpt, strip_prefix="model.")
+        # Drop ref_model.* keys (defense: re-using a Stage 3 ckpt as ref shouldn't
+        # double-wrap)
+        clean = {k: v for k, v in clean.items() if not k.startswith("ref_model.")}
+
         msg = self.molda.load_state_dict(clean, strict=False)
         logger.info(
             f"RefMolDA loaded from {path}: "
             f"missing={len(msg.missing_keys)} unexpected={len(msg.unexpected_keys)}"
         )
+        # Strict on unexpected: if ref ckpt has keys we don't recognize, the loaded
+        # weights are likely from a different model architecture → silent ref policy
+        # corruption. Better fail fast.
         if msg.unexpected_keys:
-            logger.warning(
-                f"  RefMolDA unexpected keys (first 5): {msg.unexpected_keys[:5]}"
+            raise RuntimeError(
+                f"RefMolDA: unexpected keys in ref ckpt {path}. "
+                f"This indicates ckpt/model architecture mismatch (silent ref policy "
+                f"corruption risk). First 10: {msg.unexpected_keys[:10]}"
             )
 
     def _freeze_all(self):

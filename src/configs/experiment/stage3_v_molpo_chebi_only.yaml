@@ -1,0 +1,46 @@
+# @package _global_
+# ───────────────────────────────────────────────────
+# Stage 3 V-MolPO 단일 task (ChEBI captioning) 검증 설정
+# 목적: Phase 3 — V-MolPO loss 흐름이 실제 학습에서 발산 없이 도는지 확인
+# ───────────────────────────────────────────────────
+# Usage:
+#   python scripts/train.py +experiment=stage3_v_molpo_chebi_only trainer=stage3 \
+#     pretrained_ckpt_path='./checkpoint/.../stage2/last.ckpt' \
+#     'molpo.ref_ckpt_path=./checkpoint/.../stage2/last.ckpt' \
+#     hardware.devices="'0,1,2,3,4,5'"
+#
+# 또는 launcher:
+#   bash scripts/train_stage3_v_molpo_chebi.sh
+
+defaults:
+  - override /data: raw_v1_10x_rephrase    # 단일 task filter 는 dataset 단에서
+
+tokenizer:
+  mol_token_type: selfies
+  add_mol_dict: true
+
+wandb:
+  enabled: true
+  project: MolDA_pro6000
+  run_name: stage3_v_molpo_chebi_only
+  tags: [stage3, v_molpo, chebi-20-mol2text, phase3]
+  group: stage3_v_molpo
+
+logging:
+  dir: ./checkpoint/stage3_v_molpo_chebi_only
+
+training:
+  # Phase 3 검증: 단일 task → 적은 step 으로 발산 여부 + metric 변화 관찰
+  max_epochs: 1
+  batch_size: 1                 # V-MolPO 는 collator 가 2B (mol_div=2) 만들어 effective 2x4=8
+  global_batch_size: 256        # 6 GPU 기준 256 = 1 × 6 × accum 43
+
+# V-MolPO 핵심 hyperparameter override (default stage3.yaml 값 + Phase 0 결정)
+molpo:
+  enabled: true
+  n_t: 2                        # Phase 0 sweet spot
+  antithetic: true              # 99.7% 분산 제거
+  beta: 0.1                     # LLaDA 1.5 기본
+  margin_clip_burn_in: 1000     # 1k step burn-in
+  batch_division: 2             # 순수 DPO-E (mol_div=3 ablation 별도)
+  # ref_ckpt_path 는 CLI 로 override (Stage 2 last.ckpt)

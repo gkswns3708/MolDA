@@ -19,13 +19,6 @@ logger = logging.getLogger(__name__)
 
 STAGE2_TRAINABLE_KEYS = ("qformer", "query_tokens", "opt_proj", "ln_graph")
 
-# Stage 3 V-MolPO: LoRA + embed + Q-Former (optional) trainable, base LLM frozen.
-# tune_gnn=false (default) 면 GNN/Q-Former 도 frozen, LoRA + embed 만.
-STAGE3_LORA_TRAINABLE_KEYS = (
-    "lora_", "modules_to_save", "wte", "embed", "lm_head",
-)
-STAGE3_QFORMER_TRAINABLE_KEYS = STAGE2_TRAINABLE_KEYS  # tune_gnn=true 일 때 추가
-
 
 class MolDA(nn.Module):
 
@@ -220,17 +213,14 @@ class MolDA(nn.Module):
 
         tasks_chosen = list(all_tasks[chosen_slice]) if all_tasks else [""] * B
 
-        # Forward callable factories — capture batch for graph injection
-        def _theta_fwd_for(slc):
-            sub_batch = self._slice_batch(batch, slc)
-            @torch.compile(disable=True) if False else (lambda f: f)
+        # Pre-slice once per (chosen, rejected) — avoid duplicate PyG to_data_list calls
+        chosen_sub_batch = self._slice_batch(batch, chosen_slice)
+        rejected_sub_batch = self._slice_batch(batch, rejected_slice)
+
+        def _make_theta_fwd(sub_batch):
             def fwd(noisy_ids, attn_mask):
                 return self._forward_logits(noisy_ids, attn_mask, sub_batch)
             return fwd
-
-        def _ref_fwd_for(slc):
-            sub_batch = self._slice_batch(batch, slc)
-            return self.ref_model.make_forward_fn(sub_batch)
 
         # Antithetic: same seed for θ and ref on each y. Different seed across w/l.
         seed_w = global_step * 1000 + 7
@@ -247,12 +237,18 @@ class MolDA(nn.Module):
                 mask_token_id=MASK_TOKEN_ID, attention_mask=am,
             )
 
-        # ELBOs (chosen / rejected, θ / ref)
-        elbo_theta_w = _elbo(_theta_fwd_for(chosen_slice), chosen_slice, seed_w)
-        elbo_theta_l = _elbo(_theta_fwd_for(rejected_slice), rejected_slice, seed_l)
+        # ELBOs (chosen / rejected, θ / ref) — sub_batch shared between θ and ref
+        elbo_theta_w = _elbo(_make_theta_fwd(chosen_sub_batch), chosen_slice, seed_w)
+        elbo_theta_l = _elbo(_make_theta_fwd(rejected_sub_batch), rejected_slice, seed_l)
         with torch.no_grad():
-            elbo_ref_w = _elbo(_ref_fwd_for(chosen_slice), chosen_slice, seed_w_ref)
-            elbo_ref_l = _elbo(_ref_fwd_for(rejected_slice), rejected_slice, seed_l_ref)
+            elbo_ref_w = _elbo(
+                self.ref_model.make_forward_fn(chosen_sub_batch),
+                chosen_slice, seed_w_ref,
+            )
+            elbo_ref_l = _elbo(
+                self.ref_model.make_forward_fn(rejected_sub_batch),
+                rejected_slice, seed_l_ref,
+            )
 
         # V-MolPO loss
         clip_burn_in = int(molpo_cfg.get("margin_clip_burn_in", 1000))
@@ -292,9 +288,14 @@ class MolDA(nn.Module):
         )
 
         # Build output dict (loss + per-sample for trainer/log)
+        # `tasks` length must match per_sample_loss length (trainer.py per-task logic).
+        # We expose chosen-side (length B) and let trainer prefer out["tasks"].
         out = {
             "loss": total,
             "answer_length_mean": answer_length_mean,
+            # Override batch["tasks"] (length 2B/3B) with chosen-only (length B)
+            # so trainer's per-task accumulator uses pair-aligned indexing.
+            "tasks": tasks_chosen,
             # V-MolPO sub-metrics (per-sample for logging)
             "v_molpo/loss_pref": v_out["loss_pref"],
             "v_molpo/loss_anchor": v_out["loss_anchor"],
@@ -310,7 +311,7 @@ class MolDA(nn.Module):
             "v_molpo/elbo_theta_l_mean": elbo_theta_l.mean(),
             "v_molpo/elbo_ref_l_mean": elbo_ref_l.mean(),
         }
-        # Stub per-sample fields for trainer compatibility
+        # per-sample loss fields: length must match out["tasks"] (= B)
         device = total.device
         if per_sample_loss_sft is None:
             out["per_sample_loss"] = torch.zeros(B, device=device)
@@ -376,36 +377,47 @@ class MolDA(nn.Module):
     def _apply_stage_freeze_policy(self):
         """Stage 2: only Q-Former bridge (qformer/query_tokens/opt_proj/ln_graph) trainable.
 
-        Stage 3 V-MolPO: LoRA + embed + lm_head trainable. tune_gnn=true 면 GNN/Q-Former 도.
+        Stage 3 V-MolPO: LoRA + PEFT-wrapped wte/lm_head trainable.
+                         GNN/Q-Former trainable iff cfg.model.tune_gnn=true.
+                         ref_model.* always frozen.
         """
         if self.stage < 2:
             return
 
         n_trainable = n_frozen = 0
+
         if self.stage == 2:
-            trainable_keys = STAGE2_TRAINABLE_KEYS
+            for name, p in self.named_parameters():
+                lower = name.lower()
+                if any(k in lower for k in STAGE2_TRAINABLE_KEYS):
+                    p.requires_grad = True
+                    n_trainable += p.numel()
+                else:
+                    p.requires_grad = False
+                    n_frozen += p.numel()
         else:
-            # Stage 3: LoRA + embed always trainable; QFormer/GNN per cfg.model.tune_gnn
+            # Stage 3: explicit prefix-based dispatch (avoid substring 'embed' matching
+            # GNN atom_embedding etc.).
             tune_gnn = bool(self.cfg.model.get("tune_gnn", False))
-            trainable_keys = STAGE3_LORA_TRAINABLE_KEYS
-            if tune_gnn:
-                trainable_keys = trainable_keys + STAGE3_QFORMER_TRAINABLE_KEYS
+            for name, p in self.named_parameters():
+                if name.startswith("ref_model."):
+                    # frozen reference policy — never trainable
+                    p.requires_grad = False
+                elif name.startswith("gnn.") or name.startswith("qformer."):
+                    # graph encoder + bridge — gated by tune_gnn (Stage 2 가 정렬 마쳤으면 false)
+                    p.requires_grad = tune_gnn
+                elif "lora_" in name or ".modules_to_save." in name:
+                    # PEFT LoRA adapter + PEFT-wrapped wte/lm_head (modules_to_save)
+                    p.requires_grad = True
+                else:
+                    # base LLM weights, etc. — frozen
+                    p.requires_grad = False
 
-        for name, p in self.named_parameters():
-            # ref_model parameters: always frozen (RefMolDA already sets requires_grad=False
-            # but iteration order may overwrite — guard explicitly)
-            if name.startswith("ref_model."):
-                p.requires_grad = False
-                n_frozen += p.numel()
-                continue
+                if p.requires_grad:
+                    n_trainable += p.numel()
+                else:
+                    n_frozen += p.numel()
 
-            lower = name.lower()
-            if any(k in lower for k in trainable_keys):
-                p.requires_grad = True
-                n_trainable += p.numel()
-            else:
-                p.requires_grad = False
-                n_frozen += p.numel()
         logger.info(
             f"[Stage {self.stage}] freeze policy: trainable={n_trainable:,} "
             f"frozen={n_frozen:,}"

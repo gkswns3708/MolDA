@@ -30,6 +30,17 @@ class MolDATrainer(OptimizerMixin, ValidationMixin, CheckpointMixin, pl.Lightnin
 
         self.model = MolDA(cfg)
 
+        # Stage N→N+1 이전: pretrained_ckpt_path로 weight만 로드 (없으면 skip)
+        pretrained_ckpt = cfg.get("pretrained_ckpt_path")
+        if pretrained_ckpt:
+            assert not cfg.get("ckpt_path"), (
+                "ckpt_path와 pretrained_ckpt_path는 동시에 사용 불가"
+            )
+            self.load_pretrained_state_dict(pretrained_ckpt)
+
+        # Stage-specific freeze policy (Stage 2+ 에서만 적용)
+        self.model._apply_stage_freeze_policy()
+
         # Normalize remasking_strategy to list
         rs = cfg.generation.remasking_strategy
         self._remasking_strategies = [rs] if isinstance(rs, str) else list(rs)
@@ -122,8 +133,17 @@ class MolDATrainer(OptimizerMixin, ValidationMixin, CheckpointMixin, pl.Lightnin
         self._accumulate("train/loss_no_eos", out["per_sample_loss_no_eos"].mean(), sync_dist=True)
         self._accumulate("train/answer_length_mean", out["answer_length_mean"], sync_dist=True)
 
+        # V-MolPO sub-metrics (key prefix "v_molpo/" — produced by MolDA._molpo_forward)
+        for k, v in out.items():
+            if not k.startswith("v_molpo/"):
+                continue
+            if isinstance(v, torch.Tensor):
+                v = v.mean() if v.numel() > 1 else v
+            self._accumulate(f"train/{k}", v, sync_dist=True)
+
         # Per-task loss / mask_accuracy 누적 (sync_dist=False: tasks may differ across ranks)
-        tasks = batch.get("tasks", [])
+        # V-MolPO 모드에서는 out["tasks"] (length B, chosen-only) 가 batch["tasks"] 보다 우선.
+        tasks = out.get("tasks") or batch.get("tasks", [])
         if tasks:
             per_sample_loss = out["per_sample_loss"]
             per_sample_loss_no_eos = out["per_sample_loss_no_eos"]
