@@ -45,8 +45,9 @@ molpo:
 
   # Task-adaptive margin: γ_i = lambda × |E[r_w,i]|
   lambda: 0.5               # margin scaling coefficient (논문 권장: 0.5)
-  margin_clip_scale: 1.0    # margin clipping threshold λ_clip
-  margin_clip_burn_in: 1000 # burn-in step 수 (이후 clip 해제)
+  margin_clip_scale: 1.0    # margin clipping threshold λ_clip (inactive when burn_in=0)
+  margin_clip_burn_in: 0    # 0 = disabled (VRPO/MolPO 둘 다 필수 아님). ablation 시 늘려서 활성화.
+  ema_alpha: 0.99           # TaskAnchorEMA smoothing (1% update per step)
   loss_type: sigmoid
   batch_division: 2         # 2: (chosen, rejected) pair | 3: + sft slice
   exclude_mol_tokens: false # graph token 을 loss 에서 제외할지 여부

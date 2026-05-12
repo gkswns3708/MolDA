@@ -19,7 +19,7 @@ import torch
 import torch.nn.functional as F
 
 DEFAULT_MASK_TOKEN_ID = 126336  # LLaDA <|mdm_mask|>
-DEFAULT_EPS = 1e-3
+DEFAULT_EPS = 1e-3   # LLaDA paper standard timestep floor (plan/stage3.md §4)
 
 
 def sample_shared_TM(

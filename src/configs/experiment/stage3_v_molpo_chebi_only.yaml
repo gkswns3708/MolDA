@@ -66,6 +66,6 @@ molpo:
   n_t: 2                        # Phase 0 sweet spot
   antithetic: true              # 99.7% 분산 제거
   beta: 0.1                     # LLaDA 1.5 기본
-  margin_clip_burn_in: 1000     # 1k step burn-in
+  margin_clip_burn_in: 0        # disabled (VRPO/MolPO 둘 다 필수 아님; ablation 시 늘려서 활성화)
   batch_division: 2             # 순수 DPO-E (mol_div=3 ablation 별도)
   # ref_ckpt_path 는 CLI 로 override (Stage 2 last.ckpt)
