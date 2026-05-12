@@ -15,7 +15,6 @@ from torch.utils.data import DataLoader
 
 from src.data.collator import TrainCollator, EvalCollator
 from src.data.dataset import MoleculeDataset
-from src.data.molpo_collator import MolPOTrainCollator
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +93,11 @@ class MolDADataModule(pl.LightningDataModule):
         molpo_enabled = bool(molpo_cfg and molpo_cfg.get("enabled", False))
 
         if molpo_enabled:
+            # Lazy import: molpo_collator currently has an unresolved symbol
+            # (_build_pyg_batch) used only on the molpo path. Importing at module
+            # scope breaks Stage 1/2 startup. Import here so the failure surfaces
+            # only when molpo is actually enabled (Stage 3 V-MolPO).
+            from src.data.molpo_collator import MolPOTrainCollator
             # Sanity: dataset must have chosen/rejected pair columns
             if not getattr(self.train_dataset, "has_molpo_pair", False):
                 logger.warning(
