@@ -324,8 +324,10 @@ class ValidationMixin:
         )
         self._train_pred_logger = TrainPredictionLogger(
             log_dir=log_dir,
-            log_interval=self.cfg.logging.get("train_prediction_log_interval", 100),
-            max_positions=self.cfg.logging.get("train_prediction_max_positions", 50),
+            # Defaults aligned with trainer/default.yaml (1000 / 512) so partial cfg
+            # overrides that omit these keys don't silently log 10x more often.
+            log_interval=self.cfg.logging.get("train_prediction_log_interval", 1000),
+            max_positions=self.cfg.logging.get("train_prediction_max_positions", 512),
             enabled=self.cfg.logging.get("log_train_predictions", True),
         )
         logger.info(f"Loggers initialized: log_dir={log_dir}")
