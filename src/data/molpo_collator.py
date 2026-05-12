@@ -28,7 +28,7 @@ import torch
 
 from src.data.collator import (
     GRAPH_PATTERN,
-    _build_pyg_batch,
+    _build_graph_batch,
 )
 
 logger = logging.getLogger(__name__)
@@ -201,7 +201,7 @@ class MolPOTrainCollator:
         # Graphs: replicate per slot (same prompt → same graph for chosen/rejected/sft)
         if self.mol_representation in ("string+graph", "graph_only"):
             graph_samples = kept_samples * self.batch_division  # replicate
-            graphs = _build_pyg_batch(graph_samples)
+            graphs = _build_graph_batch(graph_samples)
             if graphs is not None:
                 out["graphs"] = graphs
 
