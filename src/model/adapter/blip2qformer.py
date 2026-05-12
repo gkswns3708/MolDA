@@ -3,6 +3,12 @@
  All rights reserved.
  SPDX-License-Identifier: BSD-3-Clause
  For full license text, see the LICENSE file in the repo root or https://opensource.org/licenses/BSD-3-Clause
+
+**현재 미사용**: V-MolPO loss는 src/training/v_molpo_loss.py로 분리됐고, MolDA
+forward는 src/model/qformer.py 의 경량 wrapper만 사용. 이 파일의 Blip2Qformer
+(ITM/ITC head 포함 contrastive variant)는 향후 contrastive pretraining 단계
+(plan/stage3.md §8(d) Mol-rephrase 10× → contrastive learning) 도입 시 reference
+구현으로 부활 가능. 그 전까지는 vendored Old_MolDA 원본 보존 목적.
 """
 
 import logging

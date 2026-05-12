@@ -1,3 +1,11 @@
+"""
+**현재 미사용**: GINE+TokenGT pretrained ckpt 로드는 src/model/adapter/gine_tokengt.py
+의 GINE_TokenGT.__init__ 안에서 _strip_prefix(candidates=("blip2model.graph_encoder.X.",
+"gnn.")) 로 raw / Stage 2-wrapped prefix 둘 다 처리. 별도 loader 함수 불필요.
+향후 GNN 아키텍처가 다양해져 (e.g. SMILES-GNN, MolBert) 동적 dispatch 필요해질
+때 entry point로 부활 가능.
+"""
+
 import torch
 import torch.nn as nn
 from src.model.adapter.gin_model import GNN_MoleculeSTM

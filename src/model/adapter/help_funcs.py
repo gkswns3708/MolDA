@@ -1,3 +1,10 @@
+"""
+**현재 미사용**: 본 모듈의 pad_and_concat 등 helper 들은 vendored blip2qformer.py
+에서만 import. blip2qformer.py 가 미사용 상태(같은 패키지의 docstring 참조)라
+transitively dead. blip2qformer.py 가 contrastive pretraining 단계에서 부활할 때
+함께 살아남.
+"""
+
 from nltk.translate.bleu_score import corpus_bleu
 from nltk.translate.meteor_score import meteor_score
 from nltk.tokenize import word_tokenize
