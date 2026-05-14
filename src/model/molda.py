@@ -236,15 +236,31 @@ class MolDA(nn.Module):
         seed_pair = int(seed_base) * 1000 + 7
         seed_pair_ref = seed_pair if antithetic else seed_pair + 11
 
+        # EOS positions inside the answer region — passed to compute_elbo so
+        # the chosen-side free-SFT path can log loss_no_eos distinctly from
+        # loss (matches MaskedDiffusionLoss's EOS-exclusion logic).
+        eos_id = self.llada.tokenizer.eos_token_id
+        pair_eos_mask = (
+            ((pair_ids == eos_id) & (pair_lab != -100))
+            if eos_id is not None else None
+        )
+
         theta_out = compute_elbo(
             _make_theta_fwd(pair_sub_batch),
             pair_ids, pair_lab, n_t=n_t, seed=seed_pair,
             mask_token_id=MASK_TOKEN_ID, attention_mask=pair_am,
             return_token_loss_sum=True,
+            eos_mask=pair_eos_mask,
         )
         elbo_theta_pair = theta_out["elbo"]
         token_loss_sum_pair = theta_out["token_loss_sum"]
         answer_lens_pair = theta_out["answer_lengths"]
+        # When eos_id is None (tokenizer without EOS), fall back to the EOS-
+        # inclusive tensors so downstream consumers stay shape-compatible.
+        token_loss_sum_no_eos_pair = theta_out.get(
+            "token_loss_sum_no_eos", token_loss_sum_pair
+        )
+        content_lens_pair = theta_out.get("content_lengths", answer_lens_pair)
 
         with torch.no_grad():
             elbo_ref_pair = compute_elbo(
@@ -260,6 +276,8 @@ class MolDA(nn.Module):
             "elbo_ref_l": elbo_ref_pair[B:],
             "chosen_token_loss_sum": token_loss_sum_pair[:B],
             "chosen_answer_lens": answer_lens_pair[:B],
+            "chosen_token_loss_sum_no_eos": token_loss_sum_no_eos_pair[:B],
+            "chosen_content_lens": content_lens_pair[:B],
             "tasks_chosen": tasks_chosen,
             "B": B,
             "div": div,
@@ -334,6 +352,8 @@ class MolDA(nn.Module):
         elbo_ref_l = pair["elbo_ref_l"]
         chosen_token_loss_sum = pair["chosen_token_loss_sum"]
         chosen_answer_lens = pair["chosen_answer_lens"]
+        chosen_token_loss_sum_no_eos = pair["chosen_token_loss_sum_no_eos"]
+        chosen_content_lens = pair["chosen_content_lens"]
 
         # V-MolPO loss
         clip_burn_in = int(molpo_cfg.get("margin_clip_burn_in", 1000))
@@ -377,12 +397,14 @@ class MolDA(nn.Module):
                 # is the n_t-averaged weighted-NLL normalised by its own
                 # answer length (== -elbo).
                 per_sample_loss_sft = chosen_token_loss_sum / chosen_answer_lens.clamp(min=1.0)
-                # No EOS-vs-content distinction is tracked at this layer
-                # (Old_MolDA's instance_loss_no_eos required token-level
-                # masking that compute_elbo doesn't currently expose). Reuse
-                # the same per-sample value so per-task metrics remain
-                # populated rather than NaN.
-                per_sample_loss_no_eos_sft = per_sample_loss_sft
+                # EOS-excluded variant: drop EOS-token positions from the
+                # weighted-NLL sum and renormalise by content length
+                # (answer_len - eos_count). Mirrors MaskedDiffusionLoss so
+                # train/{task}/loss_no_eos is a distinct metric from
+                # train/{task}/loss.
+                per_sample_loss_no_eos_sft = (
+                    chosen_token_loss_sum_no_eos / chosen_content_lens.clamp(min=1.0)
+                )
                 answer_length_mean = chosen_answer_lens.mean().item()
             elif div == 3:
                 sft_batch = self._slice_batch(batch, sft_slice)

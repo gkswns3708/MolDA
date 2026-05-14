@@ -85,6 +85,7 @@ def compute_elbo(
     eps: float = DEFAULT_EPS,
     return_per_t: bool = False,
     return_token_loss_sum: bool = False,
+    eos_mask: Optional[torch.Tensor] = None,
 ):
     """n_t-MC ELBO log-likelihood estimate per sample.
 
@@ -106,19 +107,35 @@ def compute_elbo(
             importance-weighted token NLL (n_t-averaged) — used to assemble
             a token-averaged SFT loss (Old_MolDA / mol-llm_official pattern)
             without an additional forward pass.
+        eos_mask:
+            Optional [B, L] bool marking EOS-token positions inside the
+            answer region. When provided alongside `return_token_loss_sum`,
+            the returned dict also carries `token_loss_sum_no_eos` (token NLL
+            sum with EOS positions zeroed) and `content_lengths` (answer_len
+            minus EOS count, floored at 1). Mirrors MaskedDiffusionLoss's
+            EOS-exclusion logic so V-MolPO free-SFT can log loss_no_eos
+            separately from loss.
 
     Returns:
         - Default: elbo [B]
         - return_per_t=True: (elbo [B], per_t_elbo [n_t, B])
         - return_token_loss_sum=True: dict
             {"elbo": [B], "token_loss_sum": [B], "answer_lengths": [B],
-             "per_t_elbo": [n_t, B] or None}
+             "per_t_elbo": [n_t, B] or None,
+             (with eos_mask) "token_loss_sum_no_eos": [B], "content_lengths": [B]}
     """
     B, L = input_ids.shape
     device = input_ids.device
 
     answer_mask = labels != -100
     answer_lens = answer_mask.sum(dim=1).float().clamp(min=1.0)  # [B]
+
+    track_no_eos = return_token_loss_sum and eos_mask is not None
+    if track_no_eos:
+        # Defensive: restrict EOS exclusion to the answer region.
+        eos_in_answer = eos_mask & answer_mask  # [B, L]
+        eos_counts = eos_in_answer.sum(dim=1).float()  # [B]
+        content_lens = (answer_lens - eos_counts).clamp(min=1.0)  # [B]
 
     T, mask_indices_all = sample_shared_TM(
         input_ids=input_ids, labels=labels, n_t=n_t, seed=seed, eps=eps
@@ -127,6 +144,8 @@ def compute_elbo(
 
     per_t_elbo = torch.zeros(n_t, B, device=device)
     per_t_token_loss_sum = torch.zeros(n_t, B, device=device)  # weighted NLL summed over tokens, per sample
+    if track_no_eos:
+        per_t_token_loss_sum_no_eos = torch.zeros(n_t, B, device=device)
 
     for j in range(n_t):
         mask_j = mask_indices_all[j]  # [B, L] bool
@@ -148,6 +167,11 @@ def compute_elbo(
         nll_per_sample = weighted_sum_per_sample / answer_lens  # [B]
         per_t_elbo[j] = -nll_per_sample  # log p ≈ -NLL
         per_t_token_loss_sum[j] = weighted_sum_per_sample
+        if track_no_eos:
+            weighted_no_eos = torch.where(
+                eos_in_answer, torch.zeros_like(weighted), weighted
+            )
+            per_t_token_loss_sum_no_eos[j] = weighted_no_eos.sum(dim=1)
 
     elbo = per_t_elbo.mean(dim=0)  # [B]
 
@@ -157,12 +181,16 @@ def compute_elbo(
         #   sum(token_loss_sum[chosen_rows]) / sum(answer_lengths[chosen_rows])
         # which matches Old_MolDA / mol-llm_official's instance_loss pattern.
         token_loss_sum = per_t_token_loss_sum.mean(dim=0)  # [B]
-        return {
+        result = {
             "elbo": elbo,
             "token_loss_sum": token_loss_sum,
             "answer_lengths": answer_lens,
             "per_t_elbo": per_t_elbo if return_per_t else None,
         }
+        if track_no_eos:
+            result["token_loss_sum_no_eos"] = per_t_token_loss_sum_no_eos.mean(dim=0)
+            result["content_lengths"] = content_lens
+        return result
 
     if return_per_t:
         return elbo, per_t_elbo

@@ -133,6 +133,144 @@ def test_per_sample_loss_shape_matches_tasks_length():
 
 
 # ---------------------------------------------------------------------
+# eos_mask: separate loss_no_eos accounting (matches MaskedDiffusionLoss)
+# ---------------------------------------------------------------------
+def test_compute_elbo_no_eos_keys_present_when_mask_given():
+    """Passing eos_mask + return_token_loss_sum=True must add
+    token_loss_sum_no_eos and content_lengths to the result dict."""
+    from src.training.vrpo_elbo import compute_elbo
+
+    B, L, V, n_t = 3, 24, 128, 2
+    ids = torch.randint(1, V - 1, (B, L))
+    lab = ids.clone()
+    lab[:, :L // 2] = -100
+    am = torch.ones_like(ids)
+    # Mark 2 EOS-like positions per row inside the answer region
+    eos_mask = torch.zeros_like(ids, dtype=torch.bool)
+    eos_mask[:, L - 2:] = True
+
+    out = compute_elbo(
+        _mock_fwd_factory(L, V), ids, lab,
+        n_t=n_t, seed=13, mask_token_id=126336,
+        attention_mask=am, return_token_loss_sum=True,
+        eos_mask=eos_mask,
+    )
+    assert set(out.keys()) >= {
+        "elbo", "token_loss_sum", "answer_lengths",
+        "token_loss_sum_no_eos", "content_lengths",
+    }
+    assert out["token_loss_sum_no_eos"].shape == (B,)
+    assert out["content_lengths"].shape == (B,)
+    # content_lengths = answer_lens - eos_in_answer
+    expected_content = out["answer_lengths"] - torch.tensor([2.0] * B)
+    assert torch.allclose(out["content_lengths"], expected_content.clamp(min=1.0))
+
+
+def test_compute_elbo_no_eos_omitted_without_mask():
+    """Without eos_mask, the returned dict must NOT carry no-eos keys
+    (back-compat for callers that don't request EOS separation)."""
+    from src.training.vrpo_elbo import compute_elbo
+
+    B, L, V = 2, 16, 64
+    ids = torch.randint(1, V - 1, (B, L))
+    lab = ids.clone()
+    lab[:, :L // 2] = -100
+    am = torch.ones_like(ids)
+
+    out = compute_elbo(
+        _mock_fwd_factory(L, V), ids, lab,
+        n_t=2, seed=3, mask_token_id=126336,
+        attention_mask=am, return_token_loss_sum=True,
+    )
+    assert "token_loss_sum_no_eos" not in out
+    assert "content_lengths" not in out
+
+
+def test_token_loss_sum_no_eos_bounded_by_token_loss_sum():
+    """For any seed, token_loss_sum_no_eos ≤ token_loss_sum (entry-wise),
+    because no_eos zeroes out a subset of the same nonneg weighted NLL."""
+    from src.training.vrpo_elbo import compute_elbo
+
+    B, L, V = 4, 32, 256
+    ids = torch.randint(1, V - 1, (B, L))
+    lab = ids.clone()
+    lab[:, :L // 2] = -100
+    am = torch.ones_like(ids)
+    eos_mask = torch.zeros_like(ids, dtype=torch.bool)
+    # 1 EOS at the last answer position for every sample
+    eos_mask[:, -1] = True
+
+    out = compute_elbo(
+        _mock_fwd_factory(L, V), ids, lab,
+        n_t=3, seed=101, mask_token_id=126336,
+        attention_mask=am, return_token_loss_sum=True,
+        eos_mask=eos_mask,
+    )
+    assert (out["token_loss_sum_no_eos"] <= out["token_loss_sum"] + 1e-6).all()
+
+
+def test_no_eos_matches_inclusive_when_mask_all_false():
+    """All-False eos_mask must produce token_loss_sum_no_eos == token_loss_sum
+    and content_lengths == answer_lengths."""
+    from src.training.vrpo_elbo import compute_elbo
+
+    B, L, V = 3, 20, 96
+    ids = torch.randint(1, V - 1, (B, L))
+    lab = ids.clone()
+    lab[:, :L // 2] = -100
+    am = torch.ones_like(ids)
+    eos_mask = torch.zeros_like(ids, dtype=torch.bool)
+
+    out = compute_elbo(
+        _mock_fwd_factory(L, V), ids, lab,
+        n_t=2, seed=55, mask_token_id=126336,
+        attention_mask=am, return_token_loss_sum=True,
+        eos_mask=eos_mask,
+    )
+    assert torch.allclose(out["token_loss_sum_no_eos"], out["token_loss_sum"])
+    assert torch.allclose(out["content_lengths"], out["answer_lengths"])
+
+
+def test_per_sample_loss_no_eos_differs_when_eos_present():
+    """The end-to-end free-SFT formula
+        per_sample_loss = chosen_token_loss_sum / chosen_answer_lens
+        per_sample_loss_no_eos = chosen_token_loss_sum_no_eos / chosen_content_lens
+    must produce DIFFERENT values whenever at least one EOS token sits in
+    the answer region — this is the regression that motivated the fix."""
+    from src.training.vrpo_elbo import compute_elbo
+
+    B_pair = 4
+    B = B_pair // 2
+    L, V = 24, 128
+    ids = torch.randint(1, V - 1, (B_pair, L))
+    lab = ids.clone()
+    lab[:, :L // 2] = -100
+    am = torch.ones_like(ids)
+    eos_mask = torch.zeros_like(ids, dtype=torch.bool)
+    eos_mask[:, -1] = True  # one EOS per row inside the answer region
+
+    out = compute_elbo(
+        _mock_fwd_factory(L, V), ids, lab,
+        n_t=2, seed=77, mask_token_id=126336,
+        attention_mask=am, return_token_loss_sum=True,
+        eos_mask=eos_mask,
+    )
+
+    chosen_token_sum = out["token_loss_sum"][:B]
+    chosen_token_sum_no_eos = out["token_loss_sum_no_eos"][:B]
+    chosen_ans_lens = out["answer_lengths"][:B]
+    chosen_content_lens = out["content_lengths"][:B]
+
+    per_sample_loss = chosen_token_sum / chosen_ans_lens.clamp(min=1.0)
+    per_sample_loss_no_eos = (
+        chosen_token_sum_no_eos / chosen_content_lens.clamp(min=1.0)
+    )
+    # Each row should differ (denominator differs by 1, and at least one
+    # nonzero EOS-position contribution is dropped with high probability).
+    assert not torch.allclose(per_sample_loss, per_sample_loss_no_eos)
+
+
+# ---------------------------------------------------------------------
 # rewards_accuracies (GDR) metric in compute_v_molpo_loss
 # ---------------------------------------------------------------------
 def test_rewards_accuracies_in_v_molpo_output():
