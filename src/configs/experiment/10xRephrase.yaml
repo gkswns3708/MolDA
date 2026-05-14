@@ -1,0 +1,36 @@
+# @package _global_
+# ───────────────────────────────────────────────────
+# Experiment: 10xRephrase (SELFIES + molecular dictionary)
+# Train = 10x rephrase, Val/Test = raw_v1 복사본
+# Stage 2 (Q-Former only) default: max_epochs=1
+# ───────────────────────────────────────────────────
+# Usage:
+#   python scripts/train.py +experiment=10xRephrase trainer=stage2 \
+#       pretrained_ckpt_path=./checkpoint/10xRephrase/12epoch_checkpoints.ckpt
+
+defaults:
+  - override /data: 10xRephrase
+
+tokenizer:
+  mol_token_type: selfies
+  add_mol_dict: true
+
+wandb:
+  enabled: true
+  project: MolDA_pro6000
+  run_name: 10xRephrase_s${stage}
+  tags: [selfies, dict, 10xRephrase]
+  group: 10xRephrase
+
+logging:
+  dir: ./checkpoint/10xRephrase/stage${stage}
+
+training:
+  max_epochs: 1
+  batch_size: 18
+  global_batch_size: 1080
+
+# Q-Former bridge (other) learning rate; matches working wandb run lfi4r8cv (2.5e-5).
+# All other groups stay frozen (lr=0.0) per trainer/stage2.yaml.
+lr:
+  other: 2.5e-5

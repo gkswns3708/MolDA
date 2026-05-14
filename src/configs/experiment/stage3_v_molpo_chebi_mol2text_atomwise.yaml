@@ -1,0 +1,134 @@
+# @package _global_
+# ───────────────────────────────────────────────────────────────────────
+# Stage 3 V-MolPO — chebi-20-mol2text atomwise graph-rejection
+# ───────────────────────────────────────────────────────────────────────
+# Replicates the cpjreoz6 wandb run (project: MolDA_pro6000, ran 2026-05-11)
+# settings, with our newly-built atomwise rejected graphs.
+#
+# Key difference from stage3_v_molpo_chebi_only.yaml:
+#   - data: chebi_mol2text_atomwise (instead of chebi_text2mol_molpo_synth_*)
+#   - molpo_weight: 1.0   (cpjreoz6 actual, not the default 0.25)
+#   - beta: 2.0           (cpjreoz6 actual, not the default 0.1)
+#   - margin_clip_burn_in: 500   (cpjreoz6 actual)
+#   - lr: lora=5e-5, embed=5e-6, other=1e-5   (cpjreoz6 actual, more conservative)
+#   - limit_train_batches: 0.2   (cpjreoz6 — only 20% of train per epoch)
+#   - max_epochs: 2 (user requested fast verification; cpjreoz6 was 5)
+#   - graph-rejection: collator now consumes `{i}-th_rejected_*` (epoch rotation)
+#
+# Usage:
+#   bash scripts/train_stage3_v_molpo_chebi_atomwise.sh
+# Or direct:
+#   python scripts/train.py +experiment=stage3_v_molpo_chebi_mol2text_atomwise \
+#       trainer=stage3 \
+#       hardware.devices="'0,1,2,3,4,5'" \
+#       pretrained_ckpt_path='./checkpoint/10xRephrase/stage2/last.ckpt' \
+#       'molpo.ref_ckpt_path=./checkpoint/10xRephrase/stage2/last.ckpt'
+
+defaults:
+  - override /data: chebi_mol2text_atomwise
+
+tokenizer:
+  mol_token_type: selfies
+  add_mol_dict: true
+
+wandb:
+  enabled: true
+  entity: hj_ai
+  project: MolDA_pro6000
+  run_name: stage3_v_molpo_chebi_mol2text_atomwise_2epoch
+  tags: [stage3, v_molpo, chebi-20-mol2text, graph-rejection, atomwise, 2epoch_test]
+  group: stage3_v_molpo_graph
+  log_freq: 3
+
+logging:
+  dir: ./checkpoint/stage3_v_molpo_chebi_mol2text_atomwise
+
+# Learning rates — cpjreoz6 actual values (more conservative than the
+# stage3_v_molpo_chebi_only.yaml defaults). V-MolPO with reference anchoring
+# tolerates / benefits from smaller LR.
+lr:
+  lora: 5e-5
+  embed_orig: 5e-6
+  embed_new: 5e-6
+  head_orig: 0.0     # weight_tying=True: 미사용
+  head_new: 0.0      # weight_tying=True: 미사용
+  other: 1e-5        # Q-Former, GNN, query_tokens, opt_proj, ln_graph
+
+# V-MolPO hyperparameters — cpjreoz6 actual config
+molpo:
+  enabled: true
+  sft_weight: 1.0
+  molpo_weight: 1.0           # cpjreoz6: 1.0 (not the default 0.25)
+  anc_rejected_weight: 0.0
+  rejected_lambda: 1.5
+
+  beta: 2.0                   # cpjreoz6: 2.0 (not the default 0.1)
+  gamma_beta_ratio: 0.5
+  lambda: 0.5
+  ema_alpha: 0.99
+  margin_clip_scale: 1.0
+  margin_clip_burn_in: 500    # cpjreoz6: 500 (active!)
+  loss_type: sigmoid
+  batch_division: 2          # 2 slots: [chosen, rejected]. SFT loss is computed
+                             # "for free" from the chosen half of the pair forward
+                             # (Old_MolDA / mol-llm_official pattern). L_total =
+                             # sft_w · L_SFT + molpo_w · L_pref with NO extra forward.
+                             # batch_division=3 path (separate SFT slot) is retained
+                             # in molda._molpo_forward for backward compatibility.
+  exclude_mol_tokens: false
+  require_pair: true
+
+  # VRPO (Variance-Reduced Preference Optimization)
+  n_t: 2
+  antithetic: true
+  num_rejected_graphs: 6      # graph-rejection rotation (Old_MolDA convention)
+  # ref_ckpt_path: CLI 로 override
+
+training:
+  max_epochs: 2               # user requested
+  batch_size: 3               # per-GPU. Back to wivo budget (~87 GB stable) now that
+                              # SFT works in div=2 via free chosen-half loss — no need
+                              # to drop to batch=2 just to enable SFT slot.
+  # global_batch_size = N_GPUS × batch_size × accum (Lightning assert)
+  global_batch_size: 1026     # 6 GPU × 3 × accum=57
+  optimizer: adamw
+  weight_decay: 0.1
+  gradient_clip_val: 1.0
+
+# LLaDA generation — overrides for higher-quality validation
+generation:
+  remasking_strategy: ['low_confidence']
+  sampling_steps: 128          # default 32 → 128 (better generation quality)
+  val_strategies: [random, semi_ar]
+  semi_ar:
+    enabled: false
+    block_size: 32
+    steps_per_block: 16        # default 4 → 16 (4x denoising steps per block)
+
+validation:
+  num_sanity_val_steps: 0              # Disabled: Lightning's pre-training sanity runs
+                                       # BEFORE optimizer state is allocated → only ~40 GB
+                                       # memory check, far below real ~87 GB profile.
+                                       # We use `post_step_sanity` (below) instead.
+  check_val_every_n_epoch: 1           # validate at end of every training epoch
+  val_check_interval: 1.0              # float 1.0 = end-of-epoch (NOT 128 — Lightning's
+                                       # int means "every N MICRO-batches", which fires
+                                       # ~every 2.25 optimizer steps with accum=57 and
+                                       # makes the run >24h of validation alone).
+  limit_val_batches: 1.0               # 1.0 = full Val split (3,299 chebi-20-mol2text rows).
+                                       # DDP shards across 6 GPUs → ~138 batches/rank
+                                       # → ~18 min per val with sampling_steps=128.
+                                       # Smoke-test 용 50 (200 sample) 이었지만 우리는
+                                       # 전체 task validation 이 필요하므로 full 로 변경.
+  inference_batch_size: 11
+
+  # Post-step sanity val: runs after the first optimizer step completes (so
+  # m/v moment tensors are allocated and the training-time memory profile
+  # is realized). Catches real OOM scenarios that Lightning's pre-training
+  # num_sanity_val_steps cannot see.
+  post_step_sanity:
+    enabled: true
+    fire_at_step: 1      # trigger after the 1st opt.step() (post first backward)
+    max_batches: 3       # 3 val batches (with inference_batch_size=11 → 33 samples).
+                         # Minimal smoke test — just enough to verify val pipeline
+                         # doesn't OOM under realized training-time memory profile.

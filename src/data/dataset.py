@@ -8,6 +8,10 @@ Usage:
 듀얼 컬럼 데이터셋(prompt_text_smiles, prompt_text_selfies 등)에서
 mol_token_type에 따라 해당 컬럼을 기존 이름(prompt_text, target_text, input_mol_string)으로 리맵.
 기존 단일 컬럼 데이터셋(prompt_text만 존재)도 하위 호환으로 동작.
+
+V-MolPO chosen/rejected 컬럼 (`target_text_chosen`, `target_text_rejected`,
+또는 dual-column `target_text_chosen_{selfies,smiles}`) 도 자동 감지하여
+기존 키와 함께 리턴. MolPOTrainCollator 가 이를 사용.
 """
 
 from datasets import load_from_disk
@@ -20,8 +24,28 @@ class MoleculeDataset(Dataset):
         self.dataset = load_from_disk(path)
         self.mol_token_type = mol_token_type.lower()
 
+        cols = self.dataset.column_names
         # 듀얼 컬럼 존재 여부 확인 (최초 1회)
-        self._has_dual_columns = f"prompt_text_{self.mol_token_type}" in self.dataset.column_names
+        self._has_dual_columns = f"prompt_text_{self.mol_token_type}" in cols
+
+        # V-MolPO chosen/rejected 컬럼 감지 (단일 또는 dual-column 형태 둘 다 지원)
+        # Also recognise graph-only V-MolPO datasets that carry
+        # pre-computed corrupted graphs (`{i}-th_rejected_x`) and use the
+        # original `target_text` for both chosen and rejected slots.
+        self._has_graph_rejection = "0-th_rejected_x" in cols
+        self._has_molpo_pair = (
+            "target_text_chosen" in cols or
+            f"target_text_chosen_{self.mol_token_type}" in cols or
+            self._has_graph_rejection  # graph-only V-MolPO
+        )
+        self._has_molpo_pair_dual = (
+            f"target_text_chosen_{self.mol_token_type}" in cols and
+            f"target_text_rejected_{self.mol_token_type}" in cols
+        )
+
+    @property
+    def has_molpo_pair(self) -> bool:
+        return self._has_molpo_pair
 
     def __len__(self) -> int:
         return len(self.dataset)
@@ -39,6 +63,24 @@ class MoleculeDataset(Dataset):
             item["input_mol_string"] = item[f"input_mol_string_{suffix}"]
         else:
             item = dict(item)
+
+        # V-MolPO chosen/rejected: dual-column 우선, 없으면 단일 컬럼 사용
+        if self._has_molpo_pair_dual:
+            suffix = self.mol_token_type
+            item["target_text_chosen"] = item[f"target_text_chosen_{suffix}"]
+            item["target_text_rejected"] = item[f"target_text_rejected_{suffix}"]
+        # 단일 컬럼 형태 (target_text_chosen / target_text_rejected) 는 이미 dict 에 그대로 있음
+
+        # Graph-rejection V-MolPO fallback: when the dataset carries
+        # pre-computed corrupted graphs (`{i}-th_rejected_x`) but no
+        # separate chosen/rejected text columns, use the same target_text
+        # for both slots. The only chosen↔rejected difference is then the
+        # molecular graph (cpjreoz6 / chebi_mol2text_atomwise pattern).
+        if "target_text_chosen" not in item and "target_text" in item:
+            item["target_text_chosen"] = item["target_text"]
+        if "target_text_rejected" not in item and "target_text" in item:
+            item["target_text_rejected"] = item["target_text"]
+
         # DDP DistributedSampler padding duplicate 식별용 원본 dataset idx.
         # validation에서 aggregation 시 (val_idx, strategy) key로 dedup.
         item["_val_idx"] = int(idx)

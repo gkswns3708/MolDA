@@ -24,3 +24,6 @@ __pycache__/
 .vscode/
 src/ipynb/
 wandb/
+venv/
+temp/
+analysis/

@@ -1,0 +1,104 @@
+# @package _global_
+# ───────────────────────────────────────────────────────────────────────
+# Stage 3 V-MolPO — chebi-20-mol2text 0.55 mode (강한 변형) 비교 실험
+# ───────────────────────────────────────────────────────────────────────
+# Base: stage3_v_molpo_chebi_mol2text_atomwise.yaml (0.7 mode, FTS≈0.66)
+# Diff: data override → chebi_mol2text_atomwise_055 (FTS≈0.32, atom 1.4 배 증가)
+#
+# 목적: rejected graph 가 더 강하게 변형됐을 때 V-MolPO 의 학습 신호 (gdr, margin,
+# rewards_*) 가 어떻게 달라지는지, 또 downstream test 성능에 영향이 있는지 검증.
+#
+# 통제 변수: β, LR, sft_weight, molpo_weight, margin_clip_burn_in, batch_size,
+# global_batch_size 모두 0.7 mode run 과 동일 — rejected 강도만 비교 축으로.
+#
+# Usage:
+#   bash scripts/train_stage3_v_molpo_chebi_atomwise_055.sh
+# Or direct:
+#   python scripts/train.py +experiment=stage3_v_molpo_chebi_mol2text_atomwise_055 \
+#       trainer=stage3 \
+#       hardware.devices="'0,1,2,3,4,5'" \
+#       pretrained_ckpt_path='./checkpoint/10xRephrase/stage2/last.ckpt' \
+#       'molpo.ref_ckpt_path=./checkpoint/10xRephrase/stage2/last.ckpt'
+
+defaults:
+  - override /data: chebi_mol2text_atomwise_055
+
+tokenizer:
+  mol_token_type: selfies
+  add_mol_dict: true
+
+wandb:
+  enabled: true
+  entity: hj_ai
+  project: MolDA_pro6000
+  run_name: stage3_v_molpo_chebi_mol2text_atomwise_055_2epoch
+  tags: [stage3, v_molpo, chebi-20-mol2text, graph-rejection, atomwise, 055mode, fts_low, comparison, 2epoch_test]
+  group: stage3_v_molpo_graph
+  log_freq: 3
+
+logging:
+  dir: ./checkpoint/stage3_v_molpo_chebi_mol2text_atomwise_055
+
+# Learning rates — cpjreoz6 actual values (0.7 mode 와 동일)
+lr:
+  lora: 5e-5
+  embed_orig: 5e-6
+  embed_new: 5e-6
+  head_orig: 0.0     # weight_tying=True: 미사용
+  head_new: 0.0      # weight_tying=True: 미사용
+  other: 1e-5        # Q-Former, GNN, query_tokens, opt_proj, ln_graph
+
+# V-MolPO hyperparameters — 0.7 mode run 과 100% 동일 (통제 변수)
+molpo:
+  enabled: true
+  sft_weight: 1.0
+  molpo_weight: 1.0
+  anc_rejected_weight: 0.0
+  rejected_lambda: 1.5
+
+  beta: 2.0
+  gamma_beta_ratio: 0.5
+  lambda: 0.5
+  ema_alpha: 0.99
+  margin_clip_scale: 1.0
+  margin_clip_burn_in: 500
+  loss_type: sigmoid
+  batch_division: 2
+
+  exclude_mol_tokens: false
+  require_pair: true
+
+  # VRPO (Variance-Reduced Preference Optimization)
+  n_t: 2
+  antithetic: true
+  num_rejected_graphs: 6
+  # ref_ckpt_path: CLI 로 override
+
+training:
+  max_epochs: 2
+  batch_size: 3
+  global_batch_size: 1026     # 6 GPU × 3 × accum=57
+  optimizer: adamw
+  weight_decay: 0.1
+  gradient_clip_val: 1.0
+
+generation:
+  remasking_strategy: ['low_confidence']
+  sampling_steps: 128
+  val_strategies: [random, semi_ar]
+  semi_ar:
+    enabled: false
+    block_size: 32
+    steps_per_block: 16
+
+validation:
+  num_sanity_val_steps: 0
+  check_val_every_n_epoch: 1
+  val_check_interval: 1.0
+  limit_val_batches: 1.0
+  inference_batch_size: 11
+
+  post_step_sanity:
+    enabled: true
+    fire_at_step: 1
+    max_batches: 3

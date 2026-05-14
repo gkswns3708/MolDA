@@ -32,6 +32,12 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
 torch.set_float32_matmul_precision("medium")
 
+# Suppress DDP + V-MolPO 의 AccumulateGrad stream-mismatch UserWarning.
+# 매 backward 마다 발생하여 tqdm progress 를 가림. 학습 정확도에 영향 없음.
+# (DDP 가 grad node 를 stash 하여 발생하는 정상 동작)
+if hasattr(torch.autograd.graph, "set_warn_on_accumulate_grad_stream_mismatch"):
+    torch.autograd.graph.set_warn_on_accumulate_grad_stream_mismatch(False)
+
 # PyTorch 2.6+: default weights_only=True blocks OmegaConf-pickled hparams.
 # Our ckpts are our own trusted artifacts, so hard-force weights_only=False
 # even when callers (Lightning) explicitly pass weights_only=True.
@@ -98,6 +104,19 @@ def main(cfg: DictConfig):
             save_on_train_epoch_end=True,  # validation 안 도는 epoch에서도 저장 (중도 종료 시 손실 방지)
         ),
     ]
+
+    # Post-step sanity validation (memory-realistic smoke test).
+    # Unlike Lightning's `num_sanity_val_steps` which fires BEFORE training
+    # (optimizer state not yet allocated → underestimates memory by ~50%),
+    # this callback fires AFTER the first opt.step() so the val runs under
+    # the actual training-time memory profile.
+    post_step_cfg = cfg.validation.get("post_step_sanity", None)
+    if post_step_cfg is not None and bool(post_step_cfg.get("enabled", False)):
+        from src.training.post_step_sanity_val import PostStepSanityValCallback
+        callbacks.append(PostStepSanityValCallback(
+            fire_at_step=int(post_step_cfg.get("fire_at_step", 1)),
+            max_batches=int(post_step_cfg.get("max_batches", 20)),
+        ))
 
     # Strategy
     devices = cfg.hardware.devices

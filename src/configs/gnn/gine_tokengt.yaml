@@ -10,7 +10,7 @@ gine:
   hidden_dim: 1024
   drop_ratio: 0.0
   jk: last                  # Jumping Knowledge: last | sum | cat
-  ckpt: null                # pretrained checkpoint 경로 (TBD)
+  ckpt: ./checkpoint/pretrained_graph/epochepoch=45-stepstep=880440_MoleculeSTM.ckpt
 
 # ─────────────────────────────────────────────
 # TokenGT (Graph Transformer, nodes+edges as tokens)
@@ -26,4 +26,4 @@ tokengt:
   d_e: 64                   # edge PE 차원
   use_graph_token: true     # graph-level summary token 사용
   max_position_embeddings: 102
-  ckpt: null                # pretrained checkpoint 경로 (TBD)
+  ckpt: ./checkpoint/pretrained_graph/epochepoch=49-stepstep=476106_tokengt_best.ckpt

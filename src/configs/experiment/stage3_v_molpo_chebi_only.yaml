@@ -1,0 +1,71 @@
+# @package _global_
+# ───────────────────────────────────────────────────
+# Stage 3 V-MolPO 단일 task (ChEBI captioning) 검증 설정
+# 목적: Phase 3 — V-MolPO loss 흐름이 실제 학습에서 발산 없이 도는지 확인
+# ───────────────────────────────────────────────────
+# Usage:
+#   python scripts/train.py +experiment=stage3_v_molpo_chebi_only trainer=stage3 \
+#     pretrained_ckpt_path='./checkpoint/.../stage2/last.ckpt' \
+#     'molpo.ref_ckpt_path=./checkpoint/.../stage2/last.ckpt' \
+#     hardware.devices="'0,1,2,3,4,5'"
+#
+# 또는 launcher:
+#   bash scripts/train_stage3_v_molpo_chebi.sh
+
+defaults:
+  - override /data: chebi_text2mol_molpo_synth_256_5k   # 5k sample, 256 token cap, ~7시간/20epoch
+
+tokenizer:
+  mol_token_type: selfies
+  add_mol_dict: true
+
+wandb:
+  enabled: true
+  project: MolDA_pro6000
+  run_name: stage3_v_molpo_chebi_only
+  tags: [stage3, v_molpo, chebi-20-mol2text, phase3]
+  group: stage3_v_molpo
+
+logging:
+  dir: ./checkpoint/stage3_v_molpo_chebi_only
+
+training:
+  # Phase 3 단일 task trend 관찰: 5k sample × 20 epoch ≈ 7 시간 / 6 GPU.
+  # LLaDA 1.5 (350k × 1 epoch) 의 경량 단일 task 변형.
+  max_epochs: 20
+  batch_size: 4                 # per-GPU. V-MolPO collator (mol_div=2) × n_t=2 stack → effective 16/GPU
+  # global_batch_size = N_GPUS × batch_size × accum 의 배수 (Lightning assert).
+  # 240 = 6 GPU × 4 × accum 10. 다른 GPU 수 / batch 사용 시 launcher 가 자동 계산.
+  global_batch_size: 240
+
+# Validation 주기: 5 epoch 마다 (check_val_every_n_epoch).
+# val_check_interval=1.0 (default) → epoch 끝에서만 val 트리거.
+# generation: 128 sampling_steps (default 32 → 추론 품질 ↑)
+validation:
+  check_val_every_n_epoch: 5
+  val_check_interval: 1.0
+  inference_batch_size: 4
+
+generation:
+  sampling_steps: 128
+
+# Learning rates per param group.
+# V-MolPO 는 reference policy 와의 KL anchoring 이 강해서 stage 1 보다 작은 LR 사용.
+# Stage 1 base LR (2.5e-4) 의 1/2 인 1.25e-4 부터 시작 (필요 시 CLI 로 override).
+lr:
+  lora: 1.25e-4               # LoRA adapters (V-MolPO 는 reference 가 잡아주므로 보수적)
+  embed_orig: 1.25e-5         # 기존 vocab embedding (LoRA 의 1/10)
+  embed_new: 1.25e-5          # 신규 SELFIES embedding
+  head_orig: 0.0              # weight_tying=True: 미사용
+  head_new: 0.0               # weight_tying=True: 미사용
+  other: 2.5e-5               # Q-Former, GNN, query_tokens, opt_proj, ln_graph
+
+# V-MolPO 핵심 hyperparameter override (default stage3.yaml 값 + Phase 0 결정)
+molpo:
+  enabled: true
+  n_t: 2                        # Phase 0 sweet spot
+  antithetic: true              # 99.7% 분산 제거
+  beta: 0.1                     # LLaDA 1.5 기본
+  margin_clip_burn_in: 0        # disabled (VRPO/MolPO 둘 다 필수 아님; ablation 시 늘려서 활성화)
+  batch_division: 2             # 순수 DPO-E (mol_div=3 ablation 별도)
+  # ref_ckpt_path 는 CLI 로 override (Stage 2 last.ckpt)

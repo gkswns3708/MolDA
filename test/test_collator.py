@@ -203,3 +203,49 @@ class TestEvalCollator:
         samples = _make_samples(3)
         batch = collator(samples)
         assert batch["tasks"] == [s["task"] for s in samples]
+
+
+def _make_graph_samples(n=2):
+    """Synthetic samples with x/edge_index/edge_attr fields (Stage 2 graph batching)."""
+    samples = []
+    for i in range(n):
+        n_nodes = 3 + i
+        samples.append({
+            "prompt_text": "<INSTRUCTION>Use <mol> as input.</INSTRUCTION>",
+            "target_text": "<BOOLEAN> True </BOOLEAN>",
+            "task": f"task_{i}",
+            "input_mol_string": f"mol_{i}",
+            "x": [[0] * 9 for _ in range(n_nodes)],
+            "edge_index": [[0, 1], [1, 0]],
+            "edge_attr": [[0] * 3, [0] * 3],
+            "additional_x": [[0] * 9],
+            "additional_edge_index": [[0], [0]],
+            "additional_edge_attr": [[0] * 3],
+        })
+    return samples
+
+
+class TestGraphBatching:
+    """string+graph 모드에서 collator가 `graphs`/`additional_graphs`를 emit 하는지 검증."""
+
+    def test_train_collator_emits_graphs(self, real_tokenizer):
+        collator = TrainCollator(real_tokenizer, mol_representation="string+graph", max_length=128)
+        batch = collator(_make_graph_samples(2))
+        assert "graphs" in batch
+        assert "additional_graphs" in batch
+        graphs = batch["graphs"]
+        # PyG Batch: total nodes = sum of per-sample n_nodes
+        assert graphs.x.shape[0] == 3 + 4
+        assert graphs.batch.unique().numel() == 2
+
+    def test_string_only_does_not_emit_graphs(self, real_tokenizer):
+        collator = TrainCollator(real_tokenizer, mol_representation="string_only", max_length=128)
+        batch = collator(_make_graph_samples(2))
+        assert "graphs" not in batch
+        assert "additional_graphs" not in batch
+
+    def test_eval_collator_emits_graphs(self, real_tokenizer):
+        collator = EvalCollator(real_tokenizer, mol_representation="string+graph", max_length=128)
+        batch = collator(_make_graph_samples(2))
+        assert "graphs" in batch
+        assert "additional_graphs" in batch
