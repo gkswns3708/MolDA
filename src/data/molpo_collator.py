@@ -72,6 +72,7 @@ class MolPOTrainCollator:
         batch_division: int = 2,
         mol_token_type: str | None = None,
         require_pair: bool = True,
+        num_rejected_graphs: int = 6,
     ):
         assert batch_division in (2, 3), (
             f"molpo batch_division must be 2 or 3, got {batch_division}"
@@ -83,6 +84,12 @@ class MolPOTrainCollator:
         self.mol_token_type = mol_token_type
         self.require_pair = require_pair
         self.eos_token_id = tokenizer.eos_token_id
+        # Graph-rejection rotation: dataset rows can carry up to
+        # `num_rejected_graphs` pre-computed corrupted variants (Old_MolDA
+        # convention). `current_epoch` is updated externally (datamodule)
+        # so each epoch picks a different rejected variant.
+        self.num_rejected_graphs = max(1, int(num_rejected_graphs))
+        self.current_epoch = 0
 
         # Logged once per dataloader lifetime (reset by datamodule when needed)
         self._n_filtered_no_pair = 0
@@ -196,14 +203,50 @@ class MolPOTrainCollator:
             "tasks": tasks_full,
             "molpo_batch_size": B,            # B (number of pairs)
             "molpo_batch_division": self.batch_division,  # 2 or 3
+            # Per-pair dataset indices (length B, chosen-aligned). Validation
+            # GDR aggregation uses these to dedup DDP padding duplicates.
+            "val_indices": [int(s.get("_val_idx", -1)) for s in kept_samples],
         }
 
-        # Graphs: replicate per slot (same prompt → same graph for chosen/rejected/sft)
+        # Graphs: chosen slot uses each sample's original (x, edge_index,
+        # edge_attr); rejected slot uses the pre-computed `{i}-th_rejected_*`
+        # keys when present (graph-rejection V-MolPO, cpjreoz6 pattern).
+        # i = current_epoch % num_rejected_graphs (Old_MolDA epoch rotation).
+        # Falls back to chosen-graph replication when rejected keys are absent.
         if self.mol_representation in ("string+graph", "graph_only"):
-            graph_samples = kept_samples * self.batch_division  # replicate
+            i = self.current_epoch % self.num_rejected_graphs
+            rx_key = f"{i}-th_rejected_x"
+            ei_key = f"{i}-th_rejected_edge_index"
+            ea_key = f"{i}-th_rejected_edge_attr"
+
+            rejected_samples = []
+            n_with_rejected_graph = 0
+            for s in kept_samples:
+                if rx_key in s and s[rx_key] is not None:
+                    r = dict(s)
+                    r["x"] = s[rx_key]
+                    r["edge_index"] = s[ei_key]
+                    r["edge_attr"] = s[ea_key]
+                    rejected_samples.append(r)
+                    n_with_rejected_graph += 1
+                else:
+                    # No corrupted graph available → replicate chosen
+                    rejected_samples.append(s)
+
+            if self.batch_division == 3:
+                # [sft, chosen, rejected] — sft and chosen share original graph
+                graph_samples = kept_samples + kept_samples + rejected_samples
+            else:
+                # [chosen, rejected]
+                graph_samples = kept_samples + rejected_samples
+
             graphs = _build_graph_batch(graph_samples)
             if graphs is not None:
                 out["graphs"] = graphs
+            # Stash how many rejected graphs were genuine vs replicated for
+            # debugging (read by tests / logging hooks).
+            out["_n_with_rejected_graph"] = n_with_rejected_graph
+            out["_rejected_graph_epoch_idx"] = i
 
         return out
 

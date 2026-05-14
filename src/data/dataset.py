@@ -29,9 +29,14 @@ class MoleculeDataset(Dataset):
         self._has_dual_columns = f"prompt_text_{self.mol_token_type}" in cols
 
         # V-MolPO chosen/rejected 컬럼 감지 (단일 또는 dual-column 형태 둘 다 지원)
+        # Also recognise graph-only V-MolPO datasets that carry
+        # pre-computed corrupted graphs (`{i}-th_rejected_x`) and use the
+        # original `target_text` for both chosen and rejected slots.
+        self._has_graph_rejection = "0-th_rejected_x" in cols
         self._has_molpo_pair = (
             "target_text_chosen" in cols or
-            f"target_text_chosen_{self.mol_token_type}" in cols
+            f"target_text_chosen_{self.mol_token_type}" in cols or
+            self._has_graph_rejection  # graph-only V-MolPO
         )
         self._has_molpo_pair_dual = (
             f"target_text_chosen_{self.mol_token_type}" in cols and
@@ -65,6 +70,16 @@ class MoleculeDataset(Dataset):
             item["target_text_chosen"] = item[f"target_text_chosen_{suffix}"]
             item["target_text_rejected"] = item[f"target_text_rejected_{suffix}"]
         # 단일 컬럼 형태 (target_text_chosen / target_text_rejected) 는 이미 dict 에 그대로 있음
+
+        # Graph-rejection V-MolPO fallback: when the dataset carries
+        # pre-computed corrupted graphs (`{i}-th_rejected_x`) but no
+        # separate chosen/rejected text columns, use the same target_text
+        # for both slots. The only chosen↔rejected difference is then the
+        # molecular graph (cpjreoz6 / chebi_mol2text_atomwise pattern).
+        if "target_text_chosen" not in item and "target_text" in item:
+            item["target_text_chosen"] = item["target_text"]
+        if "target_text_rejected" not in item and "target_text" in item:
+            item["target_text_rejected"] = item["target_text"]
 
         # DDP DistributedSampler padding duplicate 식별용 원본 dataset idx.
         # validation에서 aggregation 시 (val_idx, strategy) key로 dedup.

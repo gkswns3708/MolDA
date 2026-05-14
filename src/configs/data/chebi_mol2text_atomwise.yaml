@@ -1,0 +1,33 @@
+# V-MolPO Stage 3 학습용 chebi-20-mol2text atomwise 데이터셋.
+#
+# build: scripts/build_chebi_mol2text_atomwise.py
+#   - target_fts: 0.7 (Mol-LLM §B.4 implied evaluation metric)
+#   - replace_ratio: 0.05 (single-substructure modification, best-of-10)
+#   - num_rejected_graphs: 6 (Old_MolDA epoch rotation convention)
+#   - skip-additional: yes (chebi-20-mol2text is single-molecule task)
+#
+# Schema (per row):
+#   - x / edge_index / edge_attr            (original molecule graph, used by chosen slot)
+#   - 0..5-th_rejected_x / edge_index / edge_attr (6 corrupted variants, used by rejected slot)
+#   - target_text (single field)            (used as both target_text_chosen and target_text_rejected
+#                                            via dataset.py fallback — graph-only V-MolPO)
+#   - prompt_text, input_mol_string, etc.   (standard fields)
+#
+# Train: 259,080 rows. Val/Test 없음.
+# 2-epoch test 에선 limit_val_batches=0 으로 val 비활성, splits.val 은 placeholder.
+
+tag: chebi_mol2text_atomwise
+root: chebi_mol2text_atomwise
+truncation: true
+padding: max_length
+max_length: 512
+gen_max_len: 256
+min_len: 8
+
+# Splits all built via scripts/build_chebi_mol2text_atomwise.py
+# (target_fts=0.7, replace_ratio=0.05, num_rejected_graphs=6, skip-additional).
+# Train: 259,080 rows  |  Val: 3,299  |  Test: 3,297
+splits:
+  train: Train
+  val: Val
+  test: Test

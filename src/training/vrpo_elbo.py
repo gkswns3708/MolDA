@@ -84,6 +84,7 @@ def compute_elbo(
     attention_mask: Optional[torch.Tensor] = None,
     eps: float = DEFAULT_EPS,
     return_per_t: bool = False,
+    return_token_loss_sum: bool = False,
 ):
     """n_t-MC ELBO log-likelihood estimate per sample.
 
@@ -99,10 +100,19 @@ def compute_elbo(
         attention_mask: [B, L] optional
         eps:           p_mask floor
         return_per_t:  if True, return per-timestep ELBO too
+        return_token_loss_sum:
+            if True, return a dict with `elbo`, `token_loss_sum`, and
+            `answer_lengths`. `token_loss_sum` is the per-sample sum of
+            importance-weighted token NLL (n_t-averaged) — used to assemble
+            a token-averaged SFT loss (Old_MolDA / mol-llm_official pattern)
+            without an additional forward pass.
 
     Returns:
-        elbo: [B] per-sample log-likelihood approximation (≤ 0)
-        (per_t_elbo: [n_t, B] if return_per_t)
+        - Default: elbo [B]
+        - return_per_t=True: (elbo [B], per_t_elbo [n_t, B])
+        - return_token_loss_sum=True: dict
+            {"elbo": [B], "token_loss_sum": [B], "answer_lengths": [B],
+             "per_t_elbo": [n_t, B] or None}
     """
     B, L = input_ids.shape
     device = input_ids.device
@@ -116,6 +126,7 @@ def compute_elbo(
     p_mask = (1.0 - eps) * T + eps  # [n_t, B], on device
 
     per_t_elbo = torch.zeros(n_t, B, device=device)
+    per_t_token_loss_sum = torch.zeros(n_t, B, device=device)  # weighted NLL summed over tokens, per sample
 
     for j in range(n_t):
         mask_j = mask_indices_all[j]  # [B, L] bool
@@ -133,10 +144,25 @@ def compute_elbo(
         per_token_nll = per_token_nll * mask_j.float()
         weighted = per_token_nll / p_mask[j].unsqueeze(-1)  # [B, L]
 
-        nll_per_sample = weighted.sum(dim=1) / answer_lens  # [B]
+        weighted_sum_per_sample = weighted.sum(dim=1)  # [B] — Σ_i in M_j weighted NLL per sample
+        nll_per_sample = weighted_sum_per_sample / answer_lens  # [B]
         per_t_elbo[j] = -nll_per_sample  # log p ≈ -NLL
+        per_t_token_loss_sum[j] = weighted_sum_per_sample
 
     elbo = per_t_elbo.mean(dim=0)  # [B]
+
+    if return_token_loss_sum:
+        # n_t-averaged per-sample weighted-token-NLL sum. The caller can
+        # assemble a token-averaged SFT loss as
+        #   sum(token_loss_sum[chosen_rows]) / sum(answer_lengths[chosen_rows])
+        # which matches Old_MolDA / mol-llm_official's instance_loss pattern.
+        token_loss_sum = per_t_token_loss_sum.mean(dim=0)  # [B]
+        return {
+            "elbo": elbo,
+            "token_loss_sum": token_loss_sum,
+            "answer_lengths": answer_lens,
+            "per_t_elbo": per_t_elbo if return_per_t else None,
+        }
 
     if return_per_t:
         return elbo, per_t_elbo

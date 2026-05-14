@@ -58,6 +58,14 @@ molpo:
   antithetic: true          # πθ ↔ πref (T, M) 공유 (필수)
   ref_ckpt_path: ???        # π_ref ckpt 경로 (Stage 2 last.ckpt, CLI 로 override)
 
+  # Validation/Test-time GDR (rewards_accuracies) — 전체 val/test set 에서
+  # chosen vs rejected ELBO 비교, dataset-level GDR 을 val/gdr/<task> 로 로깅.
+  eval_gdr: true            # 활성/비활성. 데이터셋이 rejected 변형 없으면 자동 비활성.
+  eval_n_t: 2               # ELBO Monte Carlo 샘플 수. train n_t 와 같게 잡아 train↔val
+                            # reward 추정치 분산을 맞춤. 1 → ~92s, 2 → ~184s (val 시간).
+                            # 분산 1/n_t 만큼 감소.
+  eval_batch_size: null     # null → training.batch_size 따라감
+
 validation:
   check_val_every_n_epoch: 1
   inference_batch_size: 4   # MolPO batch doubling으로 실질 8 → OOM 방지

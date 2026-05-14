@@ -69,16 +69,21 @@ class MolDATrainer(OptimizerMixin, ValidationMixin, CheckpointMixin, pl.Lightnin
         # Validation strategy-wise custom chart history (populated by ValidationMixin)
         self._val_custom_chart_history: dict = {}
 
+        # Eval phase: "val" (default) or "test" — toggled by on_test_epoch_start
+        # so async aggregation prefixes metrics with the right namespace.
+        self._eval_phase: str = "val"
+
     @property
     def tokenizer(self):
         return self.model.tokenizer
 
     # test_step reuses validation_step: Test loop produces the same
     # JSONL + failure/prediction artifacts as validation.
-    def test_step(self, batch, batch_idx):
-        return self.validation_step(batch, batch_idx)
+    def test_step(self, batch, batch_idx, dataloader_idx=0):
+        return self.validation_step(batch, batch_idx, dataloader_idx=dataloader_idx)
 
     def on_test_epoch_start(self):
+        self._eval_phase = "test"
         return self.on_validation_epoch_start()
 
     def on_test_epoch_end(self):
@@ -152,9 +157,18 @@ class MolDATrainer(OptimizerMixin, ValidationMixin, CheckpointMixin, pl.Lightnin
         self._accumulate("train/loss_no_eos", out["per_sample_loss_no_eos"].mean(), sync_dist=True)
         self._accumulate("train/answer_length_mean", out["answer_length_mean"], sync_dist=True)
 
-        # V-MolPO sub-metrics (key prefix "v_molpo/" — produced by MolDA._molpo_forward)
+        # V-MolPO sub-metrics (key prefix "v_molpo/" — produced by MolDA._molpo_forward).
+        # Per-task slicing happens below using `*_per_sample` and the [B]-form
+        # elbo tensors; skip those in the global iter to avoid duplicate scalar
+        # logs of the same value already covered by `loss_pref` / `elbo_*_mean`.
+        _v_molpo_global_skip = {
+            "v_molpo/elbo_theta_w", "v_molpo/elbo_ref_w",
+            "v_molpo/elbo_theta_l", "v_molpo/elbo_ref_l",
+        }
         for k, v in out.items():
             if not k.startswith("v_molpo/"):
+                continue
+            if k.endswith("_per_sample") or k in _v_molpo_global_skip:
                 continue
             if isinstance(v, torch.Tensor):
                 v = v.mean() if v.numel() > 1 else v
@@ -168,6 +182,20 @@ class MolDATrainer(OptimizerMixin, ValidationMixin, CheckpointMixin, pl.Lightnin
             per_sample_loss_no_eos = out["per_sample_loss_no_eos"]
             per_sample_acc = out.get("per_sample_mask_accuracy")
             per_sample_acc_no_eos = out.get("per_sample_mask_accuracy_no_eos")
+
+            # Collect V-MolPO per-sample tensors of shape [B] for task slicing.
+            # Includes `*_per_sample`, the [B]-form elbos, and the originally-[B]
+            # metrics (margin / rewards_* / gamma / avg_chosen_reward) — all match
+            # len(tasks)=B because tasks_chosen is the chosen-side slice.
+            B_tasks = len(tasks)
+            v_molpo_per_sample = {
+                k: v for k, v in out.items()
+                if k.startswith("v_molpo/")
+                and isinstance(v, torch.Tensor)
+                and v.dim() >= 1
+                and v.shape[0] == B_tasks
+            }
+
             seen = set()
             for task in tasks:
                 if task in seen:
@@ -187,6 +215,15 @@ class MolDATrainer(OptimizerMixin, ValidationMixin, CheckpointMixin, pl.Lightnin
                     self._accumulate(
                         f"train/{task}/mask_accuracy_no_eos",
                         per_sample_acc_no_eos[mask].mean(),
+                        sync_dist=False,
+                    )
+                # Per-task V-MolPO: slice every [B]-shape v_molpo tensor by task.
+                # Keys like `v_molpo/rewards_chosen`, `v_molpo/margin`,
+                # `v_molpo/loss_pref_per_sample`, `v_molpo/elbo_theta_w` etc.
+                for k, v in v_molpo_per_sample.items():
+                    self._accumulate(
+                        f"train/{task}/{k}",
+                        v[mask].mean(),
                         sync_dist=False,
                     )
 
@@ -260,19 +297,41 @@ class MolDATrainer(OptimizerMixin, ValidationMixin, CheckpointMixin, pl.Lightnin
                             sync_dist=False,
                         )
 
-        # 구간 평균 flush (log_every_n_steps 간격)
+        # 구간 평균 flush (log_every_n_steps 간격, optimizer-step 경계에서만 1회).
+        # `self.global_step` 은 optimizer step 단위라 grad-accum 의 모든 micro-batch
+        # 에서 동일 값을 유지한다. 조건만으로 flush 하면 같은 step 동안 57회 호출되어
+        # 두 번째 호출부터 buffer 가 1 entry 로 줄고, `self.log()` 의 last-write-wins
+        # 으로 직전 누적치가 단일 micro-batch 평균에 덮여 표본 수가 ~18 pair 로 추락.
+        # `is_last_micro` 가드로 optimizer.step() 이 실제 일어나는 마지막 micro-batch
+        # 에서만 flush 하여 누적된 (accum × log_interval) micro-batch 평균을 보존.
         log_interval = getattr(self.trainer, "log_every_n_steps", 1)
-        if (self.global_step + 1) % log_interval == 0:
+        accum = getattr(self.trainer, "accumulate_grad_batches", 1) or 1
+        is_last_micro = (batch_idx + 1) % accum == 0
+        if is_last_micro and (self.global_step + 1) % log_interval == 0:
             self._flush_metrics()
 
         return loss
 
     def on_train_epoch_start(self):
-        """Training epoch 시작 시 GPU 메모리 정리."""
+        """Training epoch 시작 시 GPU 메모리 정리 + collator epoch index 동기화."""
         print(f"[Rank {self.global_rank}] train_epoch_start: START", flush=True)
         import gc
         gc.collect()
         torch.cuda.empty_cache()
+
+        # Sync graph-rejection rotation index with current epoch so the
+        # MolPOTrainCollator picks a different `{i}-th_rejected_*` variant
+        # each epoch (Old_MolDA `reject_cardinal = current_epoch` pattern).
+        try:
+            dm = self.trainer.datamodule
+            loaders = getattr(self.trainer, "train_dataloader", None)
+            if loaders is not None and hasattr(loaders, "collate_fn"):
+                collator = loaders.collate_fn
+                if hasattr(collator, "current_epoch"):
+                    collator.current_epoch = int(self.current_epoch)
+        except Exception as e:
+            print(f"[Rank {self.global_rank}] collator epoch sync skipped: {e}",
+                  flush=True)
         print(f"[Rank {self.global_rank}] train_epoch_start: DONE", flush=True)
 
     def on_train_epoch_end(self):

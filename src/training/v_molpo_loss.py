@@ -157,27 +157,42 @@ def compute_v_molpo_loss(
         margin = margin_raw
         clipped = 0.0
 
-    # Preference loss
+    # Preference loss — keep [B] per-sample form before mean so the trainer
+    # can slice it by task. Scalar L_pref is still used for backprop / global
+    # logging; per-sample form goes to per-task aggregation.
     if loss_type == "sigmoid":
-        L_pref = -F.logsigmoid(margin - gamma_i).mean()
+        loss_pref_per_sample = -F.logsigmoid(margin - gamma_i)  # [B]
     elif loss_type == "hinge":
-        L_pref = F.relu(1.0 - (margin - gamma_i)).mean()
+        loss_pref_per_sample = F.relu(1.0 - (margin - gamma_i))  # [B]
     else:
         raise ValueError(f"Unknown loss_type: {loss_type}")
+    L_pref = loss_pref_per_sample.mean()
 
     # Anchor on rejected (optional)
     if anc_rejected_weight > 0.0:
-        L_anchor = -F.logsigmoid(-(r_l - rejected_lambda * avg_r_w)).mean()
+        loss_anchor_per_sample = -F.logsigmoid(-(r_l - rejected_lambda * avg_r_w))  # [B]
+        L_anchor = loss_anchor_per_sample.mean()
     else:
+        loss_anchor_per_sample = torch.zeros_like(r_w)
         L_anchor = torch.zeros((), device=r_w.device, dtype=r_w.dtype)
+
+    # GDR (Generation Direction Ratio / rewards_accuracies):
+    # per-sample binary indicator that chosen reward exceeds rejected reward.
+    # Old_MolDA / mol-llm_official compute this as `metrics[rewards/accuracies]`.
+    # Trainer averages it over batch & per-task to log fraction of correctly
+    # ordered preference pairs — the most direct DPO health metric.
+    rewards_accuracies = (margin_raw > 0).float()  # [B]
 
     return {
         "loss_pref": L_pref,
         "loss_anchor": L_anchor,
+        "loss_pref_per_sample": loss_pref_per_sample,        # [B]  for per-task aggregation
+        "loss_anchor_per_sample": loss_anchor_per_sample,    # [B]  for per-task aggregation
         "margin": margin,
         "margin_unclipped": margin_raw,
         "rewards_chosen": r_w,
         "rewards_rejected": r_l,
+        "rewards_accuracies": rewards_accuracies,            # [B]  GDR — chosen > rejected indicator
         "gamma": gamma_i,
         "avg_chosen_reward": avg_r_w,
         "margin_clipped_frac": clipped,

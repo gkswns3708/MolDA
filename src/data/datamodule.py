@@ -112,6 +112,7 @@ class MolDADataModule(pl.LightningDataModule):
                 batch_division=int(molpo_cfg.get("batch_division", 2)),
                 mol_token_type=self.cfg.tokenizer.mol_token_type,
                 require_pair=bool(molpo_cfg.get("require_pair", True)),
+                num_rejected_graphs=int(molpo_cfg.get("num_rejected_graphs", 6)),
             )
         return TrainCollator(
             tokenizer=self.train_tokenizer,
@@ -131,6 +132,54 @@ class MolDADataModule(pl.LightningDataModule):
             collate_fn=collator,
         )
 
+    def _build_val_molpo_collator(self):
+        """Val/test-side MolPOTrainCollator with rejected variant fixed to 0-th.
+
+        Same class as train but two safety knobs differ:
+        - `num_rejected_graphs=1` so the rotation (i = current_epoch %
+          num_rejected_graphs) always picks the 0-th variant, giving GDR a
+          stable definition across epochs.
+        - `require_pair=False` so multi-task datasets where some tasks lack
+          rejected variants don't crash val/test — pair-less samples are
+          silently skipped and excluded from the GDR aggregate (which is
+          task-bucketed downstream, so partial coverage is fine).
+        """
+        from src.data.molpo_collator import MolPOTrainCollator
+        coll = MolPOTrainCollator(
+            tokenizer=self.train_tokenizer,
+            mol_representation=self.cfg.model.mol_representation,
+            max_length=self.cfg.data.max_length,
+            batch_division=2,
+            mol_token_type=self.cfg.tokenizer.mol_token_type,
+            require_pair=False,
+            num_rejected_graphs=1,
+        )
+        coll.current_epoch = 0
+        return coll
+
+    def _should_add_molpo_eval_loader(self, dataset) -> bool:
+        """Return True iff a MolPO eval loader should be appended for this dataset."""
+        molpo_cfg = self.cfg.get("molpo", None)
+        if not (molpo_cfg and molpo_cfg.get("enabled", False)):
+            return False
+        if not molpo_cfg.get("eval_gdr", True):
+            return False
+        return bool(getattr(dataset, "has_molpo_pair", False))
+
+    def _build_molpo_eval_loader(self, dataset):
+        molpo_cfg = self.cfg.molpo
+        cfg_bs = molpo_cfg.get("eval_batch_size", None)
+        eval_bs = int(cfg_bs) if cfg_bs else int(self.cfg.training.batch_size)
+        return DataLoader(
+            dataset,
+            batch_size=eval_bs,
+            shuffle=False,
+            drop_last=False,
+            num_workers=self.cfg.hardware.num_workers,
+            pin_memory=True,
+            collate_fn=self._build_val_molpo_collator(),
+        )
+
     def val_dataloader(self):
         collator = EvalCollator(
             tokenizer=self.eval_tokenizer,
@@ -141,7 +190,7 @@ class MolDADataModule(pl.LightningDataModule):
         # rank별 batch 수를 맞춰주므로 hang 없음. partial batch까지 포함해
         # 전체 val sample을 metric 계산에 사용 (중복 padding 2~)는 Async
         # aggregation에서 dedup하지 않지만 영향은 미미).
-        return DataLoader(
+        gen_loader = DataLoader(
             self.val_dataset,
             batch_size=self.cfg.validation.get("inference_batch_size",
                                                 self.cfg.training.batch_size),
@@ -151,6 +200,13 @@ class MolDADataModule(pl.LightningDataModule):
             pin_memory=True,
             collate_fn=collator,
         )
+        # When V-MolPO is enabled and the val set carries pair info, return a
+        # second dataloader so `validation_step(..., dataloader_idx=1)` can
+        # compute dataset-level GDR. Always return a list for dataloader_idx
+        # signature stability.
+        if self._should_add_molpo_eval_loader(self.val_dataset):
+            return [gen_loader, self._build_molpo_eval_loader(self.val_dataset)]
+        return [gen_loader]
 
     def test_dataloader(self):
         collator = EvalCollator(
@@ -158,7 +214,7 @@ class MolDADataModule(pl.LightningDataModule):
             mol_representation=self.cfg.model.mol_representation,
             max_length=self.cfg.data.max_length,
         )
-        return DataLoader(
+        gen_loader = DataLoader(
             self.test_dataset,
             batch_size=self.cfg.validation.get("inference_batch_size",
                                                 self.cfg.training.batch_size),
@@ -168,3 +224,6 @@ class MolDADataModule(pl.LightningDataModule):
             pin_memory=True,
             collate_fn=collator,
         )
+        if self._should_add_molpo_eval_loader(self.test_dataset):
+            return [gen_loader, self._build_molpo_eval_loader(self.test_dataset)]
+        return [gen_loader]

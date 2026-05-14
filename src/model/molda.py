@@ -175,31 +175,40 @@ class MolDA(nn.Module):
 
         return self.llada.model(inputs_embeds=text_embeds, attention_mask=attention_mask)
 
-    def _molpo_forward(self, batch: dict) -> dict:
-        """V-MolPO forward: compute n_t-MC ELBO for both πθ and πref (antithetic),
-        derive r_θ = β·(B̂_θ − B̂_ref), assemble L_pref + L_anchor (+ optional L_SFT).
+    def _compute_pair_elbos(
+        self,
+        batch: dict,
+        *,
+        n_t: int,
+        antithetic: bool = True,
+        seed_base: int = 0,
+    ) -> dict:
+        """Shared ELBO computation for V-MolPO training and eval paths.
 
-        Expects batch from MolPOTrainCollator:
-            input_ids[2B or 3B, L], labels, attention_mask, tasks, molpo_batch_size=B,
-            molpo_batch_division=2 or 3, optionally graphs (replicated per slot).
+        Runs θ and ref forwards once each over [chosen | rejected] concatenated
+        batch (Old_MolDA / mol-llm_official `concatenated_forward` design).
+
+        Args:
+            batch: MolPOTrainCollator output with input_ids[2B or 3B, L], labels,
+                attention_mask, tasks, molpo_batch_size=B, molpo_batch_division.
+            n_t: number of timestep MC samples for compute_elbo.
+            antithetic: share seed between θ and ref (variance reduction).
+            seed_base: scaled to produce the compute_elbo seed (training uses
+                global_step here so consecutive steps see different masks).
+
+        Returns dict with elbo_theta_{w,l}, elbo_ref_{w,l} ([B] each), the
+        chosen-half token-loss components for free-SFT reuse, tasks_chosen,
+        and slice metadata used by the training-side caller.
         """
         from src.training.vrpo_elbo import compute_elbo
-        from src.training.v_molpo_loss import compute_v_molpo_loss, combine_total_loss
 
-        molpo_cfg = self.cfg.molpo
         B = int(batch["molpo_batch_size"])
         div = int(batch["molpo_batch_division"])
-        n_t = int(molpo_cfg.get("n_t", 2))
-        antithetic = bool(molpo_cfg.get("antithetic", True))
-        beta = float(molpo_cfg.get("beta", 0.1))
-        global_step = int(batch.get("global_step", 0))
-
         input_ids = batch["input_ids"]
         labels = batch["labels"]
         attention_mask = batch.get("attention_mask")
         all_tasks = batch.get("tasks", [])
 
-        # Slice [chosen | rejected] (or [sft | chosen | rejected])
         if div == 2:
             chosen_slice = slice(0, B)
             rejected_slice = slice(B, 2 * B)
@@ -213,42 +222,118 @@ class MolDA(nn.Module):
 
         tasks_chosen = list(all_tasks[chosen_slice]) if all_tasks else [""] * B
 
-        # Pre-slice once per (chosen, rejected) — avoid duplicate PyG to_data_list calls
-        chosen_sub_batch = self._slice_batch(batch, chosen_slice)
-        rejected_sub_batch = self._slice_batch(batch, rejected_slice)
+        pair_slice = slice(chosen_slice.start, rejected_slice.stop)
+        pair_sub_batch = self._slice_batch(batch, pair_slice)
+        pair_ids = input_ids[pair_slice]
+        pair_lab = labels[pair_slice]
+        pair_am = attention_mask[pair_slice] if attention_mask is not None else None
 
         def _make_theta_fwd(sub_batch):
             def fwd(noisy_ids, attn_mask):
                 return self._forward_logits(noisy_ids, attn_mask, sub_batch)
             return fwd
 
-        # Antithetic: same seed for θ and ref on each y. Different seed across w/l.
-        seed_w = global_step * 1000 + 7
-        seed_l = global_step * 1000 + 13
-        seed_w_ref = seed_w if antithetic else seed_w + 11
-        seed_l_ref = seed_l if antithetic else seed_l + 11
+        seed_pair = int(seed_base) * 1000 + 7
+        seed_pair_ref = seed_pair if antithetic else seed_pair + 11
 
-        def _elbo(model_fwd, slc, seed):
-            ids = input_ids[slc]
-            lab = labels[slc]
-            am = attention_mask[slc] if attention_mask is not None else None
-            return compute_elbo(
-                model_fwd, ids, lab, n_t=n_t, seed=seed,
-                mask_token_id=MASK_TOKEN_ID, attention_mask=am,
-            )
+        theta_out = compute_elbo(
+            _make_theta_fwd(pair_sub_batch),
+            pair_ids, pair_lab, n_t=n_t, seed=seed_pair,
+            mask_token_id=MASK_TOKEN_ID, attention_mask=pair_am,
+            return_token_loss_sum=True,
+        )
+        elbo_theta_pair = theta_out["elbo"]
+        token_loss_sum_pair = theta_out["token_loss_sum"]
+        answer_lens_pair = theta_out["answer_lengths"]
 
-        # ELBOs (chosen / rejected, θ / ref) — sub_batch shared between θ and ref
-        elbo_theta_w = _elbo(_make_theta_fwd(chosen_sub_batch), chosen_slice, seed_w)
-        elbo_theta_l = _elbo(_make_theta_fwd(rejected_sub_batch), rejected_slice, seed_l)
         with torch.no_grad():
-            elbo_ref_w = _elbo(
-                self.ref_model.make_forward_fn(chosen_sub_batch),
-                chosen_slice, seed_w_ref,
+            elbo_ref_pair = compute_elbo(
+                self.ref_model.make_forward_fn(pair_sub_batch),
+                pair_ids, pair_lab, n_t=n_t, seed=seed_pair_ref,
+                mask_token_id=MASK_TOKEN_ID, attention_mask=pair_am,
             )
-            elbo_ref_l = _elbo(
-                self.ref_model.make_forward_fn(rejected_sub_batch),
-                rejected_slice, seed_l_ref,
-            )
+
+        return {
+            "elbo_theta_w": elbo_theta_pair[:B],
+            "elbo_theta_l": elbo_theta_pair[B:],
+            "elbo_ref_w": elbo_ref_pair[:B],
+            "elbo_ref_l": elbo_ref_pair[B:],
+            "chosen_token_loss_sum": token_loss_sum_pair[:B],
+            "chosen_answer_lens": answer_lens_pair[:B],
+            "tasks_chosen": tasks_chosen,
+            "B": B,
+            "div": div,
+            "chosen_slice": chosen_slice,
+            "rejected_slice": rejected_slice,
+            "sft_slice": sft_slice,
+        }
+
+    @torch.no_grad()
+    def molpo_eval_forward(self, batch: dict) -> dict:
+        """Validation/test V-MolPO ELBO pass. No loss / no backward.
+
+        Computes per-sample r_w, r_l, margin, and the (r_w > r_l) indicator
+        used to aggregate GDR over the whole val/test set.
+
+        Uses `molpo.eval_n_t` (default 1) — variance ↑ tolerable since no
+        gradient flows through these values.
+        """
+        molpo_cfg = self.cfg.molpo
+        n_t = int(molpo_cfg.get("eval_n_t", 1))
+        antithetic = bool(molpo_cfg.get("antithetic", True))
+        beta = float(molpo_cfg.get("beta", 0.1))
+
+        pair = self._compute_pair_elbos(
+            batch, n_t=n_t, antithetic=antithetic,
+            seed_base=int(batch.get("global_step", 0)),
+        )
+
+        r_w = beta * (pair["elbo_theta_w"] - pair["elbo_ref_w"])
+        r_l = beta * (pair["elbo_theta_l"] - pair["elbo_ref_l"])
+        margin = r_w - r_l
+        accuracies = (margin > 0).float()
+        return {
+            "tasks": pair["tasks_chosen"],
+            "v_molpo/rewards_chosen": r_w,
+            "v_molpo/rewards_rejected": r_l,
+            "v_molpo/margin": margin,
+            "v_molpo/rewards_accuracies": accuracies,
+            "v_molpo/elbo_theta_w": pair["elbo_theta_w"],
+            "v_molpo/elbo_theta_l": pair["elbo_theta_l"],
+            "v_molpo/elbo_ref_w": pair["elbo_ref_w"],
+            "v_molpo/elbo_ref_l": pair["elbo_ref_l"],
+        }
+
+    def _molpo_forward(self, batch: dict) -> dict:
+        """V-MolPO forward: compute n_t-MC ELBO for both πθ and πref (antithetic),
+        derive r_θ = β·(B̂_θ − B̂_ref), assemble L_pref + L_anchor (+ optional L_SFT).
+
+        Expects batch from MolPOTrainCollator:
+            input_ids[2B or 3B, L], labels, attention_mask, tasks, molpo_batch_size=B,
+            molpo_batch_division=2 or 3, optionally graphs (replicated per slot).
+        """
+        from src.training.v_molpo_loss import compute_v_molpo_loss, combine_total_loss
+
+        molpo_cfg = self.cfg.molpo
+        n_t = int(molpo_cfg.get("n_t", 2))
+        antithetic = bool(molpo_cfg.get("antithetic", True))
+        beta = float(molpo_cfg.get("beta", 0.1))
+        global_step = int(batch.get("global_step", 0))
+
+        pair = self._compute_pair_elbos(
+            batch, n_t=n_t, antithetic=antithetic, seed_base=global_step,
+        )
+
+        B = pair["B"]
+        div = pair["div"]
+        sft_slice = pair["sft_slice"]
+        tasks_chosen = pair["tasks_chosen"]
+        elbo_theta_w = pair["elbo_theta_w"]
+        elbo_theta_l = pair["elbo_theta_l"]
+        elbo_ref_w = pair["elbo_ref_w"]
+        elbo_ref_l = pair["elbo_ref_l"]
+        chosen_token_loss_sum = pair["chosen_token_loss_sum"]
+        chosen_answer_lens = pair["chosen_answer_lens"]
 
         # V-MolPO loss
         clip_burn_in = int(molpo_cfg.get("margin_clip_burn_in", 1000))
@@ -266,18 +351,46 @@ class MolDA(nn.Module):
             loss_type=str(molpo_cfg.get("loss_type", "sigmoid")),
         )
 
-        # Optional SFT branch (mol_div=3)
+        # SFT branch — two paths:
+        #
+        # div=2 ("free SFT"): reuse chosen-half outputs from the pair forward
+        #   above (no extra forward). Token-averaged neg-log-likelihood on chosen,
+        #   matching Old_MolDA / mol-llm_official's `instance_loss[:B]` pattern.
+        #
+        # div=3 (legacy): separate SFT slot with its own `_sft_forward_internal`
+        #   forward. Retained for backward compatibility and for multi-task
+        #   setups where the SFT slot diverges from the chosen sample.
         loss_sft = None
         per_sample_loss_sft = None
         per_sample_loss_no_eos_sft = None
         answer_length_mean = 0.0
-        if div == 3 and float(molpo_cfg.get("sft_weight", 1.0)) > 0:
-            sft_batch = self._slice_batch(batch, sft_slice)
-            sft_out = self._sft_forward_internal(sft_batch)
-            loss_sft = sft_out["loss"]
-            per_sample_loss_sft = sft_out.get("per_sample_loss")
-            per_sample_loss_no_eos_sft = sft_out.get("per_sample_loss_no_eos")
-            answer_length_mean = sft_out.get("answer_length_mean", 0.0)
+        sft_weight = float(molpo_cfg.get("sft_weight", 1.0))
+        if sft_weight > 0:
+            if div == 2:
+                # Token-averaged: Σ_b Σ_i weighted_nll_{b,i} / Σ_b answer_len_b
+                # (matches Old_MolDA blip2_llada.py:695 — `weighted_loss.sum() /
+                # total_answer_length` — restricted to chosen rows.)
+                total_token_loss = chosen_token_loss_sum.sum()
+                total_tokens = chosen_answer_lens.sum().clamp(min=1.0)
+                loss_sft = total_token_loss / total_tokens
+                # Per-sample form for trainer's per-task accumulator. Each row
+                # is the n_t-averaged weighted-NLL normalised by its own
+                # answer length (== -elbo).
+                per_sample_loss_sft = chosen_token_loss_sum / chosen_answer_lens.clamp(min=1.0)
+                # No EOS-vs-content distinction is tracked at this layer
+                # (Old_MolDA's instance_loss_no_eos required token-level
+                # masking that compute_elbo doesn't currently expose). Reuse
+                # the same per-sample value so per-task metrics remain
+                # populated rather than NaN.
+                per_sample_loss_no_eos_sft = per_sample_loss_sft
+                answer_length_mean = chosen_answer_lens.mean().item()
+            elif div == 3:
+                sft_batch = self._slice_batch(batch, sft_slice)
+                sft_out = self._sft_forward_internal(sft_batch)
+                loss_sft = sft_out["loss"]
+                per_sample_loss_sft = sft_out.get("per_sample_loss")
+                per_sample_loss_no_eos_sft = sft_out.get("per_sample_loss_no_eos")
+                answer_length_mean = sft_out.get("answer_length_mean", 0.0)
 
         # Total loss
         total = combine_total_loss(
@@ -303,6 +416,8 @@ class MolDA(nn.Module):
             "v_molpo/margin_unclipped": v_out["margin_unclipped"],
             "v_molpo/rewards_chosen": v_out["rewards_chosen"],
             "v_molpo/rewards_rejected": v_out["rewards_rejected"],
+            "v_molpo/rewards_accuracies": v_out["rewards_accuracies"],  # Old_MolDA/mol-llm_official name
+            "v_molpo/gdr": v_out["rewards_accuracies"],                  # alias — Generation Direction Ratio (chosen > rejected)
             "v_molpo/gamma": v_out["gamma"],
             "v_molpo/avg_chosen_reward": v_out["avg_chosen_reward"],
             "v_molpo/margin_clipped_frac": v_out["margin_clipped_frac"],
@@ -310,6 +425,15 @@ class MolDA(nn.Module):
             "v_molpo/elbo_ref_w_mean": elbo_ref_w.mean(),
             "v_molpo/elbo_theta_l_mean": elbo_theta_l.mean(),
             "v_molpo/elbo_ref_l_mean": elbo_ref_l.mean(),
+            # Per-sample [B] tensors — used by trainer for per-task slicing.
+            # Their `.mean()` matches the scalar siblings above, so global
+            # logging skips these to avoid duplicate `*_per_sample` keys.
+            "v_molpo/loss_pref_per_sample": v_out["loss_pref_per_sample"],
+            "v_molpo/loss_anchor_per_sample": v_out["loss_anchor_per_sample"],
+            "v_molpo/elbo_theta_w": elbo_theta_w,
+            "v_molpo/elbo_ref_w": elbo_ref_w,
+            "v_molpo/elbo_theta_l": elbo_theta_l,
+            "v_molpo/elbo_ref_l": elbo_ref_l,
         }
         # per-sample loss fields: length must match out["tasks"] (= B)
         device = total.device

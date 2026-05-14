@@ -357,11 +357,24 @@ class ValidationMixin:
         # Open per-rank JSONL files for this epoch
         self._val_cls_fh = self._open_val_jsonl("cls")
         self._val_gen_fh = self._open_val_jsonl("gen")
+        # GDR JSONL is opened lazily on first MolPO validation_step call —
+        # the second val_dataloader (MolPO) may or may not be wired depending
+        # on cfg. Leaving None when absent skips downstream aggregation.
+        self._val_gdr_fh = None
         if self._stepwise_logger:
             self._stepwise_logger.reset()
+        # reset eval phase to "val" unless caller (on_test_epoch_start) set it
+        if not hasattr(self, "_eval_phase") or self._eval_phase != "test":
+            self._eval_phase = "val"
 
     @torch.no_grad()
-    def validation_step(self, batch, batch_idx):
+    def validation_step(self, batch, batch_idx, dataloader_idx=0):
+        # Dispatch by dataloader: idx=0 is the generation/classification path
+        # (EvalCollator batch). idx=1 is the MolPOTrainCollator pair batch
+        # used to compute dataset-level GDR. See datamodule.val_dataloader
+        # for the list ordering.
+        if dataloader_idx == 1 or "molpo_batch_size" in batch:
+            return self._validation_step_molpo(batch, batch_idx)
         tasks = batch["tasks"]
         prompt_ids = batch["prompt_input_ids"]
         prompt_mask = batch["prompt_attention_mask"]
@@ -506,13 +519,49 @@ class ValidationMixin:
                         flush=True,
                     )
 
+    @torch.no_grad()
+    def _validation_step_molpo(self, batch, batch_idx):
+        """V-MolPO validation step: per-pair ELBO → r_w, r_l, margin, accuracy
+        → JSONL records for async dataset-level GDR aggregation.
+        """
+        out = self.model.molpo_eval_forward(batch)
+        tasks = out["tasks"]
+        r_w = out["v_molpo/rewards_chosen"].detach().cpu().tolist()
+        r_l = out["v_molpo/rewards_rejected"].detach().cpu().tolist()
+        accs = out["v_molpo/rewards_accuracies"].detach().cpu().tolist()
+        margins = out["v_molpo/margin"].detach().cpu().tolist()
+        elbo_theta_w = out["v_molpo/elbo_theta_w"].detach().cpu().tolist()
+        elbo_theta_l = out["v_molpo/elbo_theta_l"].detach().cpu().tolist()
+        elbo_ref_w = out["v_molpo/elbo_ref_w"].detach().cpu().tolist()
+        elbo_ref_l = out["v_molpo/elbo_ref_l"].detach().cpu().tolist()
+        val_idxs = batch.get("val_indices", [-1] * len(tasks))
+
+        # Lazily open the gdr JSONL on first call so non-MolPO runs don't
+        # create empty files. The handle is created per rank.
+        if self._val_gdr_fh is None:
+            self._val_gdr_fh = self._open_val_jsonl("gdr")
+
+        for i, task in enumerate(tasks):
+            self._write_jsonl(self._val_gdr_fh, {
+                "val_idx": int(val_idxs[i]) if i < len(val_idxs) else -1,
+                "task": task,
+                "r_w": float(r_w[i]),
+                "r_l": float(r_l[i]),
+                "accuracy": float(accs[i]),
+                "margin": float(margins[i]),
+                "elbo_theta_w": float(elbo_theta_w[i]),
+                "elbo_theta_l": float(elbo_theta_l[i]),
+                "elbo_ref_w": float(elbo_ref_w[i]),
+                "elbo_ref_l": float(elbo_ref_l[i]),
+            })
+
     def on_validation_epoch_end(self):
         print(f"[Rank {self.global_rank}] epoch_end: START", flush=True)
 
         # ── 1. Close JSONL files (모든 rank) ──
         import os as _os
-        for fh_attr in ("_val_cls_fh", "_val_gen_fh"):
-            fh = getattr(self, fh_attr)
+        for fh_attr in ("_val_cls_fh", "_val_gen_fh", "_val_gdr_fh"):
+            fh = getattr(self, fh_attr, None)
             if fh:
                 fh.flush()
                 try:
@@ -543,10 +592,11 @@ class ValidationMixin:
             import threading
             loggers = list(self.loggers)
             tokenizer = self.tokenizer
-            print(f"[Rank 0] epoch_end: launching async thread", flush=True)
+            phase = getattr(self, "_eval_phase", "val")
+            print(f"[Rank 0] epoch_end: launching async thread (phase={phase})", flush=True)
             t = threading.Thread(
                 target=self._process_validation_async,
-                args=(val_epoch, val_step, log_dir, world_size, loggers, tokenizer),
+                args=(val_epoch, val_step, log_dir, world_size, loggers, tokenizer, phase),
                 daemon=True,
             )
             t.start()
@@ -555,12 +605,15 @@ class ValidationMixin:
         print(f"[Rank {self.global_rank}] epoch_end: RETURN", flush=True)
 
     def _process_validation_async(self, epoch, step, log_dir, world_size,
-                                   loggers, tokenizer):
+                                   loggers, tokenizer, phase="val"):
         """Rank 0 전용 비동기 스레드: JSONL 로드 → metric 계산 → 로깅.
 
         별도 스레드에서 실행되므로 Lightning hook을 blocking하지 않음.
         self.log() 대신 logger.log_metrics()를 직접 호출 (thread-safe).
         주의: self.trainer 접근 금지 (내부적으로 NCCL broadcast 호출함).
+
+        `phase`: "val" or "test" — used as the metric namespace prefix so
+        the same async pipeline produces test/* metrics from on_test_epoch_end.
         """
         try:
             print(f"[Async] loading JSONL (epoch={epoch}, step={step})...", flush=True)
@@ -568,7 +621,9 @@ class ValidationMixin:
                 log_dir, world_size, "cls", epoch, step)
             gen_data = self._load_all_val_predictions_static(
                 log_dir, world_size, "gen", epoch, step)
-            print(f"[Async] loaded {len(cls_data)} cls + {len(gen_data)} gen", flush=True)
+            gdr_data = self._load_all_val_predictions_static(
+                log_dir, world_size, "gdr", epoch, step)
+            print(f"[Async] loaded {len(cls_data)} cls + {len(gen_data)} gen + {len(gdr_data)} gdr", flush=True)
 
             val_metrics = {}
 
@@ -584,7 +639,7 @@ class ValidationMixin:
                 metrics = classification_evaluate(all_probs, data["labels"], task)
                 failure_idxs = metrics.pop("_failure_indices", [])
                 for k, v in metrics.items():
-                    val_metrics[f"val/{k}/{task}"] = v
+                    val_metrics[f"{phase}/{k}/{task}"] = v
                 if failure_idxs:
                     failed_records = [data["records"][i] for i in failure_idxs]
                     self._save_failed_per_task_static(
@@ -613,13 +668,38 @@ class ValidationMixin:
 
                 failure_idxs = metrics.pop("_failure_indices", [])
                 for k, v in metrics.items():
-                    val_metrics[f"val/{k}/{task}/{strategy}"] = v
-                    # strategy 비교 custom chart history 업데이트
-                    self._update_val_chart_history(task, k, strategy, epoch, v)
+                    val_metrics[f"{phase}/{k}/{task}/{strategy}"] = v
+                    # strategy 비교 custom chart history 업데이트 (val phase에서만 — test 는 1회성)
+                    if phase == "val":
+                        self._update_val_chart_history(task, k, strategy, epoch, v)
                 if failure_idxs:
                     failed_records = [data["records"][i] for i in failure_idxs]
                     self._save_failed_per_task_static(
                         log_dir, task, strategy, epoch, step, failed_records)
+
+            # --- V-MolPO GDR (dataset-level per-task + aggregate) ---
+            if gdr_data:
+                gdr_by_task = defaultdict(
+                    lambda: {"acc": [], "r_w": [], "r_l": [], "margin": []}
+                )
+                for item in gdr_data:
+                    t = item["task"]
+                    gdr_by_task[t]["acc"].append(float(item["accuracy"]))
+                    gdr_by_task[t]["r_w"].append(float(item["r_w"]))
+                    gdr_by_task[t]["r_l"].append(float(item["r_l"]))
+                    gdr_by_task[t]["margin"].append(float(item["margin"]))
+                all_acc = []
+                for task, d in gdr_by_task.items():
+                    n = len(d["acc"])
+                    val_metrics[f"{phase}/gdr/{task}"] = sum(d["acc"]) / n
+                    val_metrics[f"{phase}/rewards_chosen/{task}"] = sum(d["r_w"]) / n
+                    val_metrics[f"{phase}/rewards_rejected/{task}"] = sum(d["r_l"]) / n
+                    val_metrics[f"{phase}/margin/{task}"] = sum(d["margin"]) / n
+                    val_metrics[f"{phase}/gdr_n/{task}"] = float(n)
+                    all_acc.extend(d["acc"])
+                if all_acc:
+                    val_metrics[f"{phase}/gdr_mean"] = sum(all_acc) / len(all_acc)
+                    val_metrics[f"{phase}/gdr_n_total"] = float(len(all_acc))
 
             # 직접 logger 호출 (self.log() 대신 — thread-safe)
             print(f"[Async] computing metrics done, logging {len(val_metrics)} metrics...", flush=True)
@@ -638,6 +718,8 @@ class ValidationMixin:
             # Cleanup temp JSONL
             self._cleanup_val_jsonl_static(log_dir, world_size, "cls", epoch, step)
             self._cleanup_val_jsonl_static(log_dir, world_size, "gen", epoch, step)
+            if gdr_data:
+                self._cleanup_val_jsonl_static(log_dir, world_size, "gdr", epoch, step)
             print(f"[Async] predictions saved, JSONL cleaned", flush=True)
 
             # Strategy 비교 custom chart (wandb line_series) 로깅 — 실패 시 경고만

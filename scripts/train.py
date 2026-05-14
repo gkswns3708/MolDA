@@ -105,6 +105,19 @@ def main(cfg: DictConfig):
         ),
     ]
 
+    # Post-step sanity validation (memory-realistic smoke test).
+    # Unlike Lightning's `num_sanity_val_steps` which fires BEFORE training
+    # (optimizer state not yet allocated → underestimates memory by ~50%),
+    # this callback fires AFTER the first opt.step() so the val runs under
+    # the actual training-time memory profile.
+    post_step_cfg = cfg.validation.get("post_step_sanity", None)
+    if post_step_cfg is not None and bool(post_step_cfg.get("enabled", False)):
+        from src.training.post_step_sanity_val import PostStepSanityValCallback
+        callbacks.append(PostStepSanityValCallback(
+            fire_at_step=int(post_step_cfg.get("fire_at_step", 1)),
+            max_batches=int(post_step_cfg.get("max_batches", 20)),
+        ))
+
     # Strategy
     devices = cfg.hardware.devices
     if isinstance(devices, str):

@@ -1,0 +1,37 @@
+# V-MolPO Stage 3 학습용 chebi-20-mol2text atomwise 데이터셋 — 0.55 mode (강한 변형).
+#
+# build: scripts/build_chebi_mol2text_atomwise.py
+#   - target_fts: 0 (= batch mode, fts_targeted 비활성)
+#   - replace_ratio: 0.3 (substructure 다수 변경, atom 수 1.4 배 증가)
+#   - num_rejected_graphs: 6 (Old_MolDA epoch rotation convention)
+#   - skip-additional: yes (chebi-20-mol2text is single-molecule task)
+#
+# 통계 (docs/GRAPH_AUG_ATOMWISE.md §9, n=2,000 sample):
+#   - mean MACCS FTS: 0.32  (chosen 과의 Tanimoto. 0.7 mode 는 0.66)
+#   - mean atom_change_ratio: 1.44  (원자 수 1.4 배 증가, 0.7 mode 는 0.30)
+#   - mean bit-flip: 52/166  (0.7 mode 는 16.6/166)
+#   - target band [0.6, 0.8] 적중: 1.8 %  (0.7 mode 는 86.6 %)
+#   → "원본 분자와 substructure 가 절반 이상 다른 강한 negative"
+#
+# 사용 의도: V-MolPO preference signal 이 noise 에 묻히는지 검증 비교 실험.
+# 학습 metric 은 0.55 mode 가 더 빨리 좋아지나, downstream test (BLEU/ROUGE) 는
+# 0.7 mode 가 더 좋을 가능성 (DPO 의 easy-negative 문제). 비교 결과 후 결정.
+#
+# Schema (per row): chebi_mol2text_atomwise.yaml 와 동일.
+#
+# Train: 259,080 rows  |  Val: 3,299  |  Test: 3,297
+
+tag: chebi_mol2text_atomwise_055
+root: chebi_mol2text_atomwise_055
+truncation: true
+padding: max_length
+max_length: 512
+gen_max_len: 256
+min_len: 8
+
+# Splits all built via scripts/build_chebi_mol2text_atomwise.py
+# (target-fts=0, replace-ratio=0.3, num-rejected-graphs=6, skip-additional).
+splits:
+  train: Train
+  val: Val
+  test: Test
